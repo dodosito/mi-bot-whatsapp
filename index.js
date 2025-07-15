@@ -9,6 +9,7 @@ const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const DESTINO = process.env.DESTINO;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
+console.log('WHATSAPP_TOKEN:', WHATSAPP_TOKEN);
 
 
 app.use(express.json());
