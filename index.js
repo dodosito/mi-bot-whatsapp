@@ -4,11 +4,12 @@ const axios = require('axios');
 const app = express();
 const PORT = 3000;
 
-const OPENROUTER_API_KEY = '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';
-const WHATSAPP_TOKEN = 'EAAYjllIwwY8BPAzbhtVpAt38WZAaAyyF1ZBZBT6HcQvySZAaWJWeAO8MragaqFM2ZCj8GockmG626OqLmgbOcW0wbJdLxiZBUt0yMDE9enTF19P9hfKZAGtZCmMfPD2z77DutBAV3wzQGdemj8ZADoqNgw4hAuOp43SDkqyXTI5xmKNQ5i89GGCI5Juu4Tm4g6ObJjxRK2z0CzwI0Nopm8VqdBAAjOtZBWKqQVr6nYzCVsbsRMMYyOdL41E5YEvyIZD';
-const PHONE_NUMBER_ID = '744565088732711';
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
+const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
+const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
+const DESTINO = process.env.DESTINO;
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 
-const VERIFY_TOKEN = 'miverificacion123';
 
 app.use(express.json());
 
