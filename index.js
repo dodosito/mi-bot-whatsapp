@@ -1,18 +1,19 @@
 const express = require('express');
 const axios = require('axios');
 const app = express();
-app.use(express.json()); // Esto es para que el bot entienda los mensajes que le llegan
+app.use(express.json()); // Para que el bot entienda los mensajes que le llegan
 
 // --- TUS SECRETOS (VARIABLES DE ENTORNO) ---
-// NO CAMBIES estas líneas, el bot las leerá de Railway
+// El bot leerá estas claves de Railway (Variables de Entorno).
+// NO debes cambiar estas líneas en el código.
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
-const PORT = process.env.PORT || 8080; // Usaremos 8080, como vimos en tus logs
+const PORT = process.env.PORT || 8080; // Usaremos 8080, que es el puerto que Railway espera
 
-// --- RUTA PARA LA VERIFICACIÓN DE META (WhatsApp) ---
-// Esto es lo que Meta intenta contactar para saber si tu bot está vivo
+// --- RUTA PARA LA VERIFICACIÓN DE META (Webhook GET) ---
+// Meta (WhatsApp) usa esto para asegurarse de que tu bot está vivo y escuchando.
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
@@ -21,63 +22,89 @@ app.get('/webhook', (req, res) => {
   if (mode && token) {
     if (mode === 'subscribe' && token === VERIFY_TOKEN) {
       console.log('WEBHOOK_VERIFICADO ✅');
-      res.status(200).send(challenge);
+      res.status(200).send(challenge); // DEBES DEVOLVER EL "challenge" DE META
     } else {
-      // Si el token no coincide
-      console.log('Error de verificación: Token no coincide');
-      res.sendStatus(403);
+      // Si el token de verificación no coincide
+      console.log('Error de verificación: Token no coincide.');
+      res.sendStatus(403); // Forbidden
     }
   } else {
-    // Si faltan parámetros
-    console.log('Error de verificación: Faltan parámetros');
-    res.sendStatus(400);
+    // Si faltan parámetros en la solicitud de verificación
+    console.log('Error de verificación: Faltan parámetros en la URL.');
+    res.sendStatus(400); // Bad Request
   }
 });
 
-// --- RUTA PARA RECIBIR MENSAJES DE WHATSAPP ---
-// Aquí es donde tu bot recibe los mensajes de la gente
+// --- RUTA PARA RECIBIR MENSAJES DE WHATSAPP (Webhook POST) ---
+// Aquí es donde tu bot recibe los mensajes de texto que la gente le envía.
 app.post('/webhook', async (req, res) => {
   const body = req.body;
-  console.log('Mensaje recibido:', JSON.stringify(body, null, 2));
+  console.log('📥 WEBHOOK RECIBIDO:', JSON.stringify(body, null, 2));
 
-  // Verifica que el mensaje es de WhatsApp y es un mensaje de texto
-  if (body.object === 'whatsapp_business_account') {
-    if (body.entry && body.entry[0].changes && body.entry[0].changes[0].value.messages && body.entry[0].changes[0].value.messages[0]) {
-      const message = body.entry[0].changes[0].value.messages[0];
-      const from = message.from; // Número del que envía
-      const type = message.type; // Tipo de mensaje (texto, imagen, etc.)
+  // Aseguramos que es un mensaje de WhatsApp y que contiene un mensaje de texto
+  if (body.object === 'whatsapp_business_account' &&
+      body.entry &&
+      body.entry[0].changes &&
+      body.entry[0].changes[0].value.messages &&
+      body.entry[0].changes[0].value.messages[0]) {
 
-      if (type === 'text') {
-        const userMessage = message.text.body;
-        console.log(`Mensaje de ${from}: ${userMessage}`);
+    const message = body.entry[0].changes[0].value.messages[0];
+    const from = message.from; // Número de teléfono que envió el mensaje
+    const messageType = message.type; // Tipo de mensaje (text, image, etc.)
 
+    if (messageType === 'text') {
+      const userMessage = message.text.body;
+      console.log(`💬 Mensaje de ${from}: ${userMessage}`);
+
+      try {
+        // Paso 1: Enviar el mensaje del usuario a OpenRouter para obtener una respuesta del bot
+        const openRouterResponse = await axios.post(
+          'https://openrouter.ai/api/v1/chat/completions',
+          {
+            model: 'mistralai/mistral-7b-instruct', // Modelo de IA, puedes cambiarlo si quieres
+            messages: [{ role: 'user', content: userMessage }],
+          },
+          {
+            headers: {
+              'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+              'Content-Type': 'application/json',
+            },
+            timeout: 15000 // Aumenta el tiempo de espera por si OpenRouter tarda un poco
+          }
+        );
+
+        const botResponse = openRouterResponse.data.choices[0].message.content;
+        console.log('🤖 Respuesta del bot:', botResponse);
+
+        // Paso 2: Enviar la respuesta del bot de vuelta al usuario en WhatsApp
+        await axios.post(
+          `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`, // Asegúrate de que la versión de la API sea correcta (v19.0)
+          {
+            messaging_product: 'whatsapp',
+            to: from,
+            type: 'text',
+            text: { body: botResponse },
+          },
+          {
+            headers: {
+              'Authorization': `Bearer ${WHATSAPP_TOKEN}`,
+              'Content-Type': 'application/json',
+            },
+          }
+        );
+        console.log('✅ Mensaje enviado a WhatsApp.');
+
+      } catch (error) {
+        console.error('❌ ERROR al procesar mensaje o enviar respuesta:', error.response ? JSON.stringify(error.response.data, null, 2) : error.message);
+        // Si hay un error, puedes intentar enviar un mensaje de error al usuario de WhatsApp
         try {
-          // Llama a OpenRouter para obtener una respuesta
-          const openRouterResponse = await axios.post(
-            'https://openrouter.ai/api/v1/chat/completions',
-            {
-              model: 'mistralai/mistral-7b-instruct', // Puedes cambiar el modelo si quieres
-              messages: [{ role: 'user', content: userMessage }],
-            },
-            {
-              headers: {
-                'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
-                'Content-Type': 'application/json',
-              },
-            }
-          );
-
-          const botResponse = openRouterResponse.data.choices[0].message.content;
-          console.log(`Respuesta del bot: ${botResponse}`);
-
-          // Envía la respuesta de vuelta a WhatsApp
           await axios.post(
             `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`,
             {
               messaging_product: 'whatsapp',
               to: from,
               type: 'text',
-              text: { body: botResponse },
+              text: { body: 'Lo siento, no pude procesar tu solicitud en este momento. Intenta de nuevo más tarde.' },
             },
             {
               headers: {
@@ -86,76 +113,40 @@ app.post('/webhook', async (req, res) => {
               },
             }
           );
-          console.log('Mensaje enviado a WhatsApp');
-
-        } catch (error) {
-          console.error('Error al procesar el mensaje o enviar respuesta:', error.response ? error.response.data : error.message);
-          // Opcional: Envía un mensaje de error al usuario de WhatsApp
-          await axios.post(
-            `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`,
-            {
-              messaging_product: 'whatsapp',
-              to: from,
-              type: 'text',
-              text: { body: 'Lo siento, hubo un error al procesar tu mensaje. Intenta de nuevo más tarde.' },
-            },
-            {
-              headers: {
-                'Authorization': `Bearer ${WHATSAPP_TOKEN}`,
-                'Content-Type': 'application/json',
-              },
-            }
-          );
+        } catch (sendError) {
+          console.error('❌ ERROR al enviar mensaje de error al usuario:', sendError.response ? JSON.stringify(sendError.response.data, null, 2) : sendError.message);
         }
-      } else {
-        console.log(`Mensaje no es de texto o no es válido: ${type}`);
-        // Opcional: Puedes enviar un mensaje diciendo que solo procesas texto
-         await axios.post(
-            `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`,
-            {
-              messaging_product: 'whatsapp',
-              to: from,
-              type: 'text',
-              text: { body: 'Solo puedo responder a mensajes de texto por ahora.' },
-            },
-            {
-              headers: {
-                'Authorization': `Bearer ${WHATSAPP_TOKEN}`,
-                'Content-Type': 'application/json',
-              },
-            }
-          );
       }
     } else {
-      console.log('No hay mensajes válidos en la entrada.');
+      console.log(`Mensaje no es de texto. Tipo: ${messageType}`);
+      // Opcional: Notificar al usuario que solo se procesan mensajes de texto
+      try {
+          await axios.post(
+            `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`,
+            {
+              messaging_product: 'whatsapp',
+              to: from,
+              type: 'text',
+              text: { body: 'Lo siento, solo puedo responder a mensajes de texto por ahora.' },
+            },
+            {
+              headers: {
+                'Authorization': `Bearer ${WHATSAPP_TOKEN}`,
+                'Content-Type': 'application/json',
+              },
+            }
+          );
+        } catch (sendError) {
+          console.error('❌ ERROR al enviar mensaje de solo texto:', sendError.response ? JSON.stringify(sendError.response.data, null, 2) : sendError.message);
+        }
     }
+  } else {
+    console.log('El webhook no contiene un mensaje de WhatsApp válido.');
   }
-  res.sendStatus(200); // Siempre responde 200 OK a WhatsApp para que no reintente
+  res.sendStatus(200); // MUY IMPORTANTE: Siempre responde 200 OK a WhatsApp para que no reintente el mismo mensaje.
 });
 
 // --- INSTRUCCIÓN FINAL PARA QUE EL BOT SE QUEDE ENCENDIDO ---
-// ESTO ES LO MÁS IMPORTANTE PARA QUE RAILWAY NO LO APAGUE
+// Esto es lo que mantiene tu aplicación Express escuchando en el puerto
+// y evita que Railway la apague.
 app.listen(PORT, () => {
-  console.log(`Servidor escuchando en http://localhost:${PORT}`);
-  console.log('¡El bot está vivo y esperando mensajes!');
-});
-
-// --- INSTRUCCIÓN FINAL PARA QUE EL BOT SE QUEDE ENCENDIDO ---
-// ESTO ES LO MÁS IMPORTANTE PARA QUE RAILWAY NO LO APAGUE
-app.listen(PORT, () => {
-  console.log(`Servidor escuchando en http://localhost:${PORT}`);
-  console.log('¡El bot está vivo y esperando mensajes!');
-});
-
-// --- CÓDIGO EXTRA PARA AYUDAR AL BOT A PERMANECER ACTIVO EN RAILWAY ---
-// Esto es para que el bot responda correctamente cuando Railway intente apagarlo
-// y se asegure de no terminar por sí solo inesperadamente.
-process.on('SIGINT', () => {
-  console.log('Señal SIGINT recibida. Cerrando servidor...');
-  process.exit(0); // Cierra el proceso de forma limpia
-});
-
-process.on('SIGTERM', () => {
-  console.log('Señal SIGTERM recibida. Cerrando servidor...');
-  process.exit(0); // Cierra el proceso de forma limpia
-});
