@@ -4,14 +4,19 @@ const axios = require('axios');
 const app = express();
 const PORT = 3000;
 
+// ✅ Primero DECLARA las variables de entorno
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
+const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
+const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
+const DESTINO = process.env.DESTINO;
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
+
+// ✅ Luego haz el console.log
 console.log('OPENROUTER_API_KEY:', OPENROUTER_API_KEY);
 console.log('WHATSAPP_TOKEN:', `"${WHATSAPP_TOKEN}"`);
 console.log('PHONE_NUMBER_ID:', PHONE_NUMBER_ID);
 console.log('DESTINO:', DESTINO);
 console.log('VERIFY_TOKEN:', VERIFY_TOKEN);
-
-
-
 
 app.use(express.json());
 
@@ -35,11 +40,12 @@ app.post('/webhook', async (req, res) => {
   const body = req.body;
 
   if (body.object) {
-    if (body.entry &&
-        body.entry[0].changes &&
-        body.entry[0].changes[0].value.messages &&
-        body.entry[0].changes[0].value.messages[0]) {
-      
+    if (
+      body.entry &&
+      body.entry[0].changes &&
+      body.entry[0].changes[0].value.messages &&
+      body.entry[0].changes[0].value.messages[0]
+    ) {
       const message = body.entry[0].changes[0].value.messages[0];
       const text = message.text.body;
       const from = message.from;
@@ -64,7 +70,7 @@ app.post('/webhook', async (req, res) => {
           },
           {
             headers: {
-              'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+              Authorization: `Bearer ${OPENROUTER_API_KEY}`,
               'Content-Type': 'application/json'
             },
             timeout: 10000
@@ -84,7 +90,7 @@ app.post('/webhook', async (req, res) => {
           },
           {
             headers: {
-              'Authorization': `Bearer ${WHATSAPP_TOKEN}`,
+              Authorization: `Bearer ${WHATSAPP_TOKEN}`,
               'Content-Type': 'application/json'
             }
           }
