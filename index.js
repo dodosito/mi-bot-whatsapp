@@ -139,3 +139,23 @@ app.listen(PORT, () => {
   console.log(`Servidor escuchando en http://localhost:${PORT}`);
   console.log('¡El bot está vivo y esperando mensajes!');
 });
+
+// --- INSTRUCCIÓN FINAL PARA QUE EL BOT SE QUEDE ENCENDIDO ---
+// ESTO ES LO MÁS IMPORTANTE PARA QUE RAILWAY NO LO APAGUE
+app.listen(PORT, () => {
+  console.log(`Servidor escuchando en http://localhost:${PORT}`);
+  console.log('¡El bot está vivo y esperando mensajes!');
+});
+
+// --- CÓDIGO EXTRA PARA AYUDAR AL BOT A PERMANECER ACTIVO EN RAILWAY ---
+// Esto es para que el bot responda correctamente cuando Railway intente apagarlo
+// y se asegure de no terminar por sí solo inesperadamente.
+process.on('SIGINT', () => {
+  console.log('Señal SIGINT recibida. Cerrando servidor...');
+  process.exit(0); // Cierra el proceso de forma limpia
+});
+
+process.on('SIGTERM', () => {
+  console.log('Señal SIGTERM recibida. Cerrando servidor...');
+  process.exit(0); // Cierra el proceso de forma limpia
+});
