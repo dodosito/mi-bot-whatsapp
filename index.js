@@ -2,16 +2,15 @@ const express = require('express');
 const axios = require('axios');
 
 const app = express();
-const PORT = 3000;
+// ✅ Cambiado:
+const PORT = process.env.PORT || 3000;
 
-// ✅ Primero DECLARA las variables de entorno
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const DESTINO = process.env.DESTINO;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 
-// ✅ Luego haz el console.log
 console.log('OPENROUTER_API_KEY:', OPENROUTER_API_KEY);
 console.log('WHATSAPP_TOKEN:', `"${WHATSAPP_TOKEN}"`);
 console.log('PHONE_NUMBER_ID:', PHONE_NUMBER_ID);
