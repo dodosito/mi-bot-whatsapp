@@ -12,7 +12,7 @@ const DESTINO = process.env.DESTINO;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 
 console.log('OPENROUTER_API_KEY:', OPENROUTER_API_KEY);
-console.log('WHATSAPP_TOKEN:', `"${WHATSAPP_TOKEN}"`);
+console.log('WHATSAPP_TOKEN:', WHATSAPP_TOKEN);
 console.log('PHONE_NUMBER_ID:', PHONE_NUMBER_ID);
 console.log('DESTINO:', DESTINO);
 console.log('VERIFY_TOKEN:', VERIFY_TOKEN);
