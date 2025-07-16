@@ -1,7 +1,19 @@
 const express = require('express');
 const axios = require('axios');
+const admin = require('firebase-admin'); // Importa la librería de Firebase Admin SDK
 const app = express();
 app.use(express.json()); // Para que el bot entienda los mensajes que le llegan
+
+// --- CONFIGURACIÓN DE FIREBASE/FIRESTORE ---
+// Lee la clave secreta JSON de las variables de entorno de Railway
+const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY);
+
+// Inicializa Firebase Admin SDK
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount)
+});
+
+const db = admin.firestore(); // Obtiene una referencia a la base de datos Firestore
 
 // --- RUTA PARA EL CHEQUEO DE SALUD DE RAILWAY ---
 // Esta ruta es solo para Railway. Siempre responde 200 OK para que Railway sepa que el bot está vivo.
@@ -16,7 +28,7 @@ const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
-const PORT = process.env.PORT || 3000; // Railway expone el puerto 3000
+const PORT = process.env.PORT || 3000; // Railway asigna 8080 internamente, pero 3000 es el respaldo.
 
 // --- RUTA PARA LA VERIFICACIÓN DE META (Webhook GET) ---
 // Meta (WhatsApp) usa esto para asegurarse de que tu bot está vivo y escuchando.
@@ -58,6 +70,7 @@ app.post('/webhook', async (req, res) => {
     const from = message.from; // Número de teléfono que envió el mensaje
     const messageId = message.id; // ID del mensaje para marcarlo como leído
     const messageType = message.type; // Tipo de mensaje (text, image, etc.)
+    const timestamp = new Date(parseInt(message.timestamp) * 1000); // Convierte el timestamp a fecha legible
 
     // Marcar el mensaje como leído en WhatsApp (opcional, pero buena práctica)
     try {
@@ -84,6 +97,8 @@ app.post('/webhook', async (req, res) => {
       const userMessage = message.text.body;
       console.log(`💬 Mensaje de ${from}: ${userMessage}`);
 
+      let botResponse = 'Lo siento, no pude obtener una respuesta en este momento.'; // Default response
+
       try {
         // Paso 1: Enviar el mensaje del usuario a OpenRouter para obtener una respuesta del bot
         const openRouterResponse = await axios.post(
@@ -101,7 +116,7 @@ app.post('/webhook', async (req, res) => {
           }
         );
 
-        const botResponse = openRouterResponse.data.choices[0].message.content;
+        botResponse = openRouterResponse.data.choices[0].message.content;
         console.log('🤖 Respuesta del bot:', botResponse);
 
         // Paso 2: Enviar la respuesta del bot de vuelta al usuario en WhatsApp
@@ -124,27 +139,23 @@ app.post('/webhook', async (req, res) => {
 
       } catch (error) {
         console.error('❌ ERROR al procesar mensaje o enviar respuesta:', error.response ? JSON.stringify(error.response.data, null, 2) : error.message);
-        // Si hay un error, puedes intentar enviar un mensaje de error al usuario de WhatsApp
-        try {
-          await axios.post(
-            `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`,
-            {
-              messaging_product: 'whatsapp',
-              to: from,
-              type: 'text',
-              text: { body: 'Lo siento, no pude procesar tu solicitud en este momento. Intenta de nuevo más tarde.' },
-            },
-            {
-              headers: {
-                'Authorization': `Bearer ${WHATSAPP_TOKEN}`,
-                'Content-Type': 'application/json',
-              },
-            }
-          );
-        } catch (sendError) {
-          console.error('❌ ERROR al enviar mensaje de error al usuario:', sendError.response ? JSON.stringify(sendError.response.data, null, 2) : sendError.message);
-        }
+        // Si hay un error, el botResponse ya tiene el mensaje de error por defecto
       }
+
+      // --- GUARDAR LA CONVERSACIÓN EN FIRESTORE ---
+      try {
+        await db.collection('conversations').add({
+          phoneNumber: from,
+          userMessage: userMessage,
+          botResponse: botResponse, // Guarda la respuesta real o el mensaje de error si hubo uno
+          timestamp: timestamp,
+          messageId: messageId
+        });
+        console.log('💾 Conversación guardada en Firestore.');
+      } catch (dbError) {
+        console.error('❌ ERROR al guardar en Firestore:', dbError.message);
+      }
+
     } else {
       console.log(`Mensaje no es de texto. Tipo: ${messageType}`);
       // Opcional: Notificar al usuario que solo se procesan mensajes de texto
