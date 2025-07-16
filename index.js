@@ -10,7 +10,7 @@ const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
-const PORT = process.env.PORT || 8080; // Usaremos 8080, que es el puerto que Railway espera
+const PORT = process.env.PORT || 3000; // Usaremos 8080, que es el puerto que Railway espera
 
 // --- RUTA PARA LA VERIFICACIÓN DE META (Webhook GET) ---
 // Meta (WhatsApp) usa esto para asegurarse de que tu bot está vivo y escuchando.
