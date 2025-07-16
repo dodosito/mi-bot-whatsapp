@@ -2,7 +2,8 @@ const express = require('express');
 const axios = require('axios');
 
 const app = express();
-// ✅ Cambiado:
+
+// ✅ Railway asigna dinámicamente el puerto
 const PORT = process.env.PORT || 3000;
 
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
@@ -11,14 +12,9 @@ const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const DESTINO = process.env.DESTINO;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 
-console.log('OPENROUTER_API_KEY:', OPENROUTER_API_KEY);
-console.log('WHATSAPP_TOKEN:', WHATSAPP_TOKEN);
-console.log('PHONE_NUMBER_ID:', PHONE_NUMBER_ID);
-console.log('DESTINO:', DESTINO);
-console.log('VERIFY_TOKEN:', VERIFY_TOKEN);
-
 app.use(express.json());
 
+// ✅ Ruta de verificación del webhook
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
@@ -34,6 +30,7 @@ app.get('/webhook', (req, res) => {
   }
 });
 
+// ✅ Ruta para recibir mensajes de WhatsApp
 app.post('/webhook', async (req, res) => {
   console.log('📥 WEBHOOK RECIBIDO');
   const body = req.body;
@@ -109,6 +106,7 @@ app.post('/webhook', async (req, res) => {
   }
 });
 
+// ✅ IMPORTANTE: sin localhost
 app.listen(PORT, () => {
-  console.log(`Servidor escuchando en http://localhost:${PORT}`);
+  console.log(`Servidor escuchando en el puerto ${PORT}`);
 });
