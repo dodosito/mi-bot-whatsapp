@@ -2,7 +2,7 @@ const express = require('express');
 const axios = require('axios');
 
 const app = express();
-const PORT = process.env.PORT || 3000; // Esto le dice que use el puerto de Railway, o el 3000 si no hay uno.
+const PORT = process.env.PORT || 8080; // Esto le dice que use el puerto de Railway, o el 3000 si no hay uno.
 
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
