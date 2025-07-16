@@ -50,7 +50,29 @@ app.post('/webhook', async (req, res) => {
 
     const message = body.entry[0].changes[0].value.messages[0];
     const from = message.from; // Número de teléfono que envió el mensaje
+    const messageId = message.id; // ID del mensaje para marcarlo como leído
     const messageType = message.type; // Tipo de mensaje (text, image, etc.)
+
+    // Marcar el mensaje como leído en WhatsApp (opcional, pero buena práctica)
+    try {
+        await axios.post(
+            `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`,
+            {
+                messaging_product: 'whatsapp',
+                status: 'read',
+                message_id: messageId
+            },
+            {
+                headers: {
+                    'Authorization': `Bearer ${WHATSAPP_TOKEN}`,
+                    'Content-Type': 'application/json',
+                }
+            }
+        );
+        console.log(`Mensaje ${messageId} marcado como leído.`);
+    } catch (readError) {
+        console.error('Error al marcar mensaje como leído:', readError.response ? JSON.stringify(readError.response.data, null, 2) : readError.message);
+    }
 
     if (messageType === 'text') {
       const userMessage = message.text.body;
@@ -61,7 +83,7 @@ app.post('/webhook', async (req, res) => {
         const openRouterResponse = await axios.post(
           'https://openrouter.ai/api/v1/chat/completions',
           {
-            model: 'mistralai/mistral-7b-instruct', // Modelo de IA, puedes cambiarlo si quieres
+            model: 'moonshotai/kimi-k2:free', // Usando el modelo original que tenías
             messages: [{ role: 'user', content: userMessage }],
           },
           {
@@ -141,7 +163,8 @@ app.post('/webhook', async (req, res) => {
         }
     }
   } else {
-    console.log('El webhook no contiene un mensaje de WhatsApp válido.');
+    // Esto captura webhooks que no son de WhatsApp o no tienen el formato esperado
+    console.log('El webhook recibido no contiene un mensaje de WhatsApp válido o no es de una cuenta de negocio.');
   }
   res.sendStatus(200); // MUY IMPORTANTE: Siempre responde 200 OK a WhatsApp para que no reintente el mismo mensaje.
 });
@@ -150,3 +173,6 @@ app.post('/webhook', async (req, res) => {
 // Esto es lo que mantiene tu aplicación Express escuchando en el puerto
 // y evita que Railway la apague.
 app.listen(PORT, () => {
+  console.log(`Servidor escuchando en http://localhost:${PORT}`);
+  console.log('¡El bot está vivo y esperando mensajes! 🚀');
+});
