@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1", // <--- ¡ASEGÚRATE DE QUE TERMINA EN COMA!
+    "test": "echo \"Error: no test specified\" && exit 1", // <--- ¡ASEGÚRATE DE QUE TERMINA EN COMA
     "start": "node index.js" // <--- ¡ESTA LÍNEA NO LLEVA COMA AL FINAL! (Porque es la última dentro de "scripts")
   },
   "keywords": [],
