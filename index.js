@@ -49,15 +49,11 @@ async function sendWhatsAppMessage(to, messageBody, messageType = 'text', intera
 }
 
 async function findProductsInCatalog(text) {
-    console.log(`🔎 Buscando productos para el texto: "${text}"`);
     const searchKeywords = text.toLowerCase().split(' ').filter(word => word.length > 2);
     if (searchKeywords.length === 0) return [];
-    const productsRef = db.collection('products');
-    const snapshot = await productsRef.where('searchTerms', 'array-contains-any', searchKeywords).get();
+    const snapshot = await db.collection('products').where('searchTerms', 'array-contains-any', searchKeywords).get();
     if (snapshot.empty) return [];
-    const foundProducts = snapshot.docs.map(doc => doc.data());
-    console.log(`✨ Productos encontrados:`, foundProducts.map(p => p.productName));
-    return foundProducts;
+    return snapshot.docs.map(doc => doc.data());
 }
 
 // --- VARIABLES DE ENTORNO Y RUTAS (SIN CAMBIOS) ---
@@ -83,38 +79,30 @@ app.post('/webhook', async (req, res) => {
   
   const message = req.body.entry[0].changes[0].value.messages[0];
   const from = message.from;
-  const messageType = message.type;
-  
-  let userMessage;
-  let originalText = '';
+  let userMessage, originalText = '';
 
-  if (messageType === 'text') {
-      userMessage = message.text.body.toLowerCase().trim();
-      originalText = message.text.body;
-  } else if (message.interactive?.type === 'button_reply') {
-      userMessage = message.interactive.button_reply.id;
-  } else if (message.interactive?.type === 'list_reply') {
-      userMessage = message.interactive.list_reply.id;
+  if (message.type === 'text') {
+      userMessage = originalText = message.text.body;
+  } else if (message.interactive) {
+      userMessage = message.interactive[message.interactive.type].id;
   } else {
       return res.sendStatus(200);
   }
   
-  console.log(`💬 Mensaje de ${from} (${messageType}): ${userMessage}`);
+  console.log(`💬 Mensaje de ${from} (${message.type}): ${userMessage}`);
   const currentUserState = await getUserState(from);
-  let currentStatus = currentUserState.status;
-  let currentData = currentUserState.data || {};
+  let { status, data = {} } = currentUserState;
 
   try {
-      if (userMessage === 'resetear') {
+      if (userMessage.toLowerCase().trim() === 'resetear') {
           await setUserState(from, 'IDLE', {});
           await sendWhatsAppMessage(from, 'Estado reseteado. ✅');
           return res.sendStatus(200);
       }
       
-      switch (currentStatus) {
+      switch (status) {
           case 'IDLE':
           case 'AWAITING_MAIN_MENU_CHOICE':
-              // ... (sin cambios)
               if (userMessage === 'start_order') {
                   const instructions = "Por favor, ingresa tu pedido. Puedes incluir varios productos.\n\n*(Por ej: 5 cajas de cerveza pilsen y 3 gaseosas)*";
                   await sendWhatsAppMessage(from, instructions);
@@ -127,56 +115,84 @@ app.post('/webhook', async (req, res) => {
               break;
 
           case 'AWAITING_ORDER_TEXT':
-              // ... (sin cambios)
               const foundProducts = await findProductsInCatalog(originalText);
               if (foundProducts.length === 0) {
-                  await sendWhatsAppMessage(from, "Lo siento, no encontré productos que coincidan con tu búsqueda. Intenta de nuevo.");
+                  await sendWhatsAppMessage(from, "Lo siento, no encontré productos que coincidan con tu búsqueda.");
               } else if (foundProducts.length === 1) {
-                  const product = foundProducts[0];
-                  await sendWhatsAppMessage(from, `Encontré "${product.productName}". ¿Qué cantidad necesitas?`);
-                  currentData.pendingProduct = product;
-                  await setUserState(from, 'AWAITING_QUANTITY', currentData);
+                  data.pendingProduct = foundProducts[0];
+                  await sendWhatsAppMessage(from, `Encontré "${data.pendingProduct.productName}". ¿Qué cantidad necesitas?`);
+                  await setUserState(from, 'AWAITING_QUANTITY', data);
               } else {
-                  const clarificationMenu = { type: 'list', header: { type: 'text', text: 'Múltiples coincidencias' }, body: { text: `Para "${originalText}", ¿a cuál de estos te refieres?` }, footer: { text: 'Selecciona uno' }, action: { button: 'Ver opciones', sections: [{ title: 'Elige una presentación', rows: foundProducts.filter(p => p.shortName).map(p => ({ id: p.sku, title: p.shortName, description: p.productName })) }] } };
+                  const clarificationMenu = { type: 'list', header: { type: 'text', text: 'Múltiples coincidencias' }, body: { text: `Para "${originalText}", ¿a cuál de estos te refieres?` }, action: { button: 'Ver opciones', sections: [{ title: 'Elige una presentación', rows: foundProducts.filter(p => p.shortName).map(p => ({ id: p.sku, title: p.shortName, description: p.productName })) }] } };
                   if (clarificationMenu.action.sections[0].rows.length > 0) {
                     await sendWhatsAppMessage(from, '', 'interactive', clarificationMenu);
-                    await setUserState(from, 'AWAITING_CLARIFICATION', currentData);
+                    await setUserState(from, 'AWAITING_CLARIFICATION', data);
                   }
               }
               break;
           
           case 'AWAITING_CLARIFICATION':
-              // ... (sin cambios)
-              const selectedSku = userMessage;
-              const productDoc = await db.collection('products').doc(selectedSku).get();
+              const productDoc = await db.collection('products').doc(userMessage).get();
               if (productDoc.exists) {
-                  const selectedProduct = productDoc.data();
-                  await sendWhatsAppMessage(from, `Seleccionaste "${selectedProduct.productName}". ¿Qué cantidad necesitas?`);
-                  currentData.pendingProduct = selectedProduct;
-                  await setUserState(from, 'AWAITING_QUANTITY', currentData);
+                  data.pendingProduct = productDoc.data();
+                  await sendWhatsAppMessage(from, `Seleccionaste "${data.pendingProduct.productName}". ¿Qué cantidad necesitas?`);
+                  await setUserState(from, 'AWAITING_QUANTITY', data);
               }
               break;
 
-          // --- AQUÍ EMPIEZA LA LÓGICA AÑADIDA ---
           case 'AWAITING_QUANTITY':
               const quantity = parseInt(userMessage);
               if (isNaN(quantity) || quantity <= 0) {
                   await sendWhatsAppMessage(from, "Por favor, ingresa una cantidad numérica válida.");
-                  break; // Se mantiene en el mismo estado esperando una cantidad correcta
+                  break;
               }
+              data.pendingQuantity = quantity; // Guardamos la cantidad temporalmente
 
-              // Añadir el producto completo al carrito
+              // --- NUEVO PASO: PREGUNTAR POR LA UNIDAD DE MEDIDA ---
+              const product = data.pendingProduct;
+              if (product && product.availableUnits && product.availableUnits.length > 0) {
+                  const unitMenu = {
+                      type: 'button',
+                      body: { text: `Entendido, ${quantity}. ¿En qué unidad?` },
+                      action: {
+                          buttons: product.availableUnits.map(unit => ({
+                              type: 'reply',
+                              reply: { id: unit.toLowerCase(), title: unit }
+                          }))
+                      }
+                  };
+                  await sendWhatsAppMessage(from, '', 'interactive', unitMenu);
+                  await setUserState(from, 'AWAITING_UOM', data);
+              } else {
+                  // Si el producto no tiene unidades definidas, se asume 'unidad' y se va al carrito
+                  const newOrderItem = { ...data.pendingProduct, quantity: data.pendingQuantity, unit: 'unidad' };
+                  data.orderItems.push(newOrderItem);
+                  delete data.pendingProduct;
+                  delete data.pendingQuantity;
+                  // (Lógica del carrito... que ahora irá en AWAITING_UOM)
+                  await sendWhatsAppMessage(from, "Producto añadido (unidad por defecto)."); // Placeholder
+                  await setUserState(from, 'AWAITING_ORDER_ACTION', data);
+              }
+              break;
+
+          // --- NUEVO ESTADO PARA CAPTURAR LA UNIDAD DE MEDIDA ---
+          case 'AWAITING_UOM':
+              const selectedUnit = userMessage;
+
+              // Añadir el producto completo (con unidad) al carrito
               const newOrderItem = {
-                  ...currentData.pendingProduct,
-                  quantity: quantity
+                  ...data.pendingProduct,
+                  quantity: data.pendingQuantity,
+                  unit: selectedUnit
               };
-              currentData.orderItems.push(newOrderItem);
-              delete currentData.pendingProduct; // Limpiamos el producto pendiente
+              data.orderItems.push(newOrderItem);
+              delete data.pendingProduct;
+              delete data.pendingQuantity;
 
-              // Crear el resumen del carrito
+              // Crear el resumen del carrito (AHORA SÍ CON UNIDAD DE MEDIDA)
               let summary = "Este es tu pedido hasta ahora:\n\n";
-              currentData.orderItems.forEach(item => {
-                  summary += `• ${item.quantity} de ${item.productName}\n`;
+              data.orderItems.forEach(item => {
+                  summary += `• ${item.quantity} ${item.unit} de ${item.productName}\n`;
               });
               summary += "\n¿Qué deseas hacer?";
 
@@ -191,52 +207,45 @@ app.post('/webhook', async (req, res) => {
                   }
               };
               await sendWhatsAppMessage(from, '', 'interactive', cartMenu);
-              await setUserState(from, 'AWAITING_ORDER_ACTION', currentData);
+              await setUserState(from, 'AWAITING_ORDER_ACTION', data);
               break;
 
           case 'AWAITING_ORDER_ACTION':
               if (userMessage === 'add_more_products') {
                   await sendWhatsAppMessage(from, "Claro, ¿qué más deseas añadir?");
-                  await setUserState(from, 'AWAITING_ORDER_TEXT', currentData);
+                  await setUserState(from, 'AWAITING_ORDER_TEXT', data);
               } else if (userMessage === 'finish_order') {
                   await sendWhatsAppMessage(from, "Perfecto. ¿Confirmas que este es tu pedido final? (sí/no)");
-                  await setUserState(from, 'AWAITING_FINAL_CONFIRMATION', currentData);
-              } else {
-                  await sendWhatsAppMessage(from, "Por favor, elige una opción de los botones.");
+                  await setUserState(from, 'AWAITING_FINAL_CONFIRMATION', data);
               }
               break;
             
           case 'AWAITING_FINAL_CONFIRMATION':
-              if (userMessage === 'sí' || userMessage === 'si') {
+              if (userMessage.toLowerCase().trim() === 'sí' || userMessage.toLowerCase().trim() === 'si') {
                   const orderNumber = `PEDIDO-${Date.now()}`;
                   const finalMessage = `¡Pedido confirmado! ✅\n\nTu número de orden es: *${orderNumber}*\n\nGracias por tu compra.`;
-                  
-                  // Guardar el pedido final
                   await db.collection('orders').add({ 
-                      orderNumber: orderNumber,
+                      orderNumber,
                       phoneNumber: from, 
                       status: 'CONFIRMED',
                       orderDate: admin.firestore.FieldValue.serverTimestamp(),
-                      items: currentData.orderItems
+                      items: data.orderItems
                   });
-
                   await sendWhatsAppMessage(from, finalMessage);
                   await setUserState(from, 'IDLE', {});
               } else {
-                  await sendWhatsAppMessage(from, "Pedido cancelado. Puedes iniciar de nuevo cuando quieras enviando 'hola'.");
+                  await sendWhatsAppMessage(from, "Pedido cancelado. Puedes iniciar de nuevo cuando quieras.");
                   await setUserState(from, 'IDLE', {});
               }
               break;
 
           default:
-              await sendWhatsAppMessage(from, 'Lo siento, hubo un error. Por favor, empieza de nuevo enviando "hola".');
+              await sendWhatsAppMessage(from, 'Lo siento, hubo un error. Por favor, empieza de nuevo.');
               await setUserState(from, 'IDLE', {});
               break;
       }
   } catch (error) {
       console.error('❌ ERROR en la lógica del bot:', error);
-      await sendWhatsAppMessage(from, 'Lo siento, ocurrió un error inesperado. Intenta de nuevo.');
-      await setUserState(from, 'IDLE', {});
   }
   
   res.sendStatus(200);
@@ -244,5 +253,4 @@ app.post('/webhook', async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`Servidor escuchando en el puerto ${PORT}`);
-  console.log('¡El bot está vivo y esperando mensajes! 🚀');
 });
