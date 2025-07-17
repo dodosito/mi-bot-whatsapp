@@ -6,7 +6,6 @@ app.use(express.json());
 
 // --- CONFIGURACIÓN DE FIREBASE/FIRESTORE ---
 const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY);
-// Evita el error de reinicialización en entornos de desarrollo
 if (!admin.apps.length) {
   admin.initializeApp({
     credential: admin.credential.cert(serviceAccount)
@@ -160,16 +159,24 @@ app.post('/webhook', async (req, res) => {
                           button: 'Ver opciones',
                           sections: [{
                               title: 'Elige una presentación',
-                              rows: foundProducts.map(p => ({
+                              // --- ESTA ES LA LÍNEA CON EL "SEGURO" ---
+                              rows: foundProducts
+                                .filter(p => p.shortName) // Solo incluye productos que SÍ tienen un nombre corto
+                                .map(p => ({
                                   id: p.sku,
-                                  title: p.shortName,       // <-- CAMBIO CLAVE: Usamos el nombre corto
-                                  description: p.productName  // <-- CAMBIO CLAVE: Y el largo en la descripción
-                              }))
+                                  title: p.shortName,
+                                  description: p.productName
+                                }))
                           }]
                       }
                   };
-                  await sendWhatsAppMessage(from, '', 'interactive', clarificationMenu);
-                  await setUserState(from, 'AWAITING_CLARIFICATION', currentData);
+                  // Verificamos si después del filtro quedaron filas para mostrar
+                  if (clarificationMenu.action.sections[0].rows.length > 0) {
+                    await sendWhatsAppMessage(from, '', 'interactive', clarificationMenu);
+                    await setUserState(from, 'AWAITING_CLARIFICATION', currentData);
+                  } else {
+                    await sendWhatsAppMessage(from, "Lo siento, encontré productos pero no pude generar las opciones. Por favor, contacta a soporte.");
+                  }
               }
               break;
           
@@ -179,7 +186,7 @@ app.post('/webhook', async (req, res) => {
               const doc = await productsRef.get();
               if (!doc.exists) {
                   await sendWhatsAppMessage(from, "Hubo un error al seleccionar el producto. Intenta de nuevo.");
-                  await setUserState(from, 'AWAIT-ORDER_TEXT', currentData);
+                  await setUserState(from, 'AWAITING_ORDER_TEXT', currentData);
               } else {
                   const selectedProduct = doc.data();
                   await sendWhatsAppMessage(from, `Seleccionaste "${selectedProduct.productName}". ¿Qué cantidad necesitas?`);
