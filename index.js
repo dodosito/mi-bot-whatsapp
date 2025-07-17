@@ -32,7 +32,7 @@ async function sendWhatsAppMessage(to, messageBody, messageType = 'text', intera
         type: messageType,
     };
     if (messageType === 'text') {
-        payload.text = { body: messageBody, preview_url: false };
+        payload.text = { body: messageBody };
     } else if (messageType === 'interactive' && interactivePayload) {
         payload.interactive = interactivePayload;
     }
@@ -51,30 +51,28 @@ async function sendWhatsAppMessage(to, messageBody, messageType = 'text', intera
 async function findProductsInCatalog(text) {
     const searchKeywords = text.toLowerCase().split(' ').filter(word => word.length > 2);
     if (searchKeywords.length === 0) return [];
-    const productsRef = db.collection('products');
-    const snapshot = await productsRef.where('searchTerms', 'array-contains-any', searchKeywords).get();
+    const snapshot = await db.collection('products').where('searchTerms', 'array-contains-any', searchKeywords).get();
     if (snapshot.empty) return [];
-    let maxScore = 0;
-    const scoredProducts = snapshot.docs.map(doc => {
-        const product = doc.data();
-        let score = 0;
-        searchKeywords.forEach(keyword => {
-            if (product.searchTerms.includes(keyword)) score++;
-        });
-        if (score > maxScore) maxScore = score;
-        return { ...product, score };
-    });
-    return scoredProducts.filter(p => p.score === maxScore);
+    return snapshot.docs.map(doc => doc.data());
 }
 
 async function showCartSummary(from, data) {
-    let summary = "*Este es tu pedido hasta ahora:*\n\n";
+    let summary = "Este es tu pedido hasta ahora:\n\n";
     data.orderItems.forEach(item => {
         summary += `• ${item.quantity} ${item.unit} de ${item.productName}\n`;
     });
     summary += "\n¿Qué deseas hacer?";
 
-    const cartMenu = { type: 'button', body: { text: summary }, action: { buttons: [{ type: 'reply', reply: { id: 'add_more_products', title: '➕ Añadir más' } }, { type: 'reply', reply: { id: 'finish_order', title: '✅ Finalizar Pedido' } }] } };
+    const cartMenu = {
+        type: 'button',
+        body: { text: summary },
+        action: {
+            buttons: [
+                { type: 'reply', reply: { id: 'add_more_products', title: '➕ Añadir más' } },
+                { type: 'reply', reply: { id: 'finish_order', title: '✅ Finalizar Pedido' } }
+            ]
+        }
+    };
     await sendWhatsAppMessage(from, '', 'interactive', cartMenu);
     await setUserState(from, 'AWAITING_ORDER_ACTION', data);
 }
@@ -82,15 +80,7 @@ async function showCartSummary(from, data) {
 // --- VARIABLES DE ENTORNO Y RUTAS ---
 const PORT = process.env.PORT || 3000;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
-
 app.get('/health', (req, res) => res.sendStatus(200));
-
-// --- ¡NUEVA RUTA PRINCIPAL! ---
-// Esta ruta le responde a Railway que el bot está vivo.
-app.get('/', (req, res) => {
-    res.status(200).send('El bot de WhatsApp está activo y escuchando. ¡Hola desde la raíz!');
-});
-
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
@@ -102,45 +92,167 @@ app.get('/webhook', (req, res) => {
   }
 });
 
-// --- RUTA PRINCIPAL PARA RECIBIR MENSAJES (SIN CAMBIOS) ---
+// --- RUTA PRINCIPAL PARA RECIBIR MENSAJES ---
 app.post('/webhook', async (req, res) => {
-    if (!req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0]) {
-        return res.sendStatus(200);
-    }
+  if (!req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0]) {
+    return res.sendStatus(200);
+  }
+  
+  const message = req.body.entry[0].changes[0].value.messages[0];
+  const from = message.from;
+  let userMessage, originalText = '';
 
-    const message = req.body.entry[0].changes[0].value.messages[0];
-    const from = message.from;
-    let userMessage, originalText = '';
+  if (message.type === 'text') {
+      userMessage = originalText = message.text.body;
+  } else if (message.interactive) {
+      userMessage = message.interactive[message.interactive.type].id;
+  } else {
+      return res.sendStatus(200);
+  }
+  
+  const currentUserState = await getUserState(from);
+  let { status, data = {} } = currentUserState;
 
-    if (message.type === 'text') {
-        userMessage = originalText = message.text.body;
-    } else if (message.interactive) {
-        userMessage = message.interactive[message.interactive.type].id;
-    } else {
-        return res.sendStatus(200);
-    }
-    
-    const currentUserState = await getUserState(from);
-    let { status, data = {} } = currentUserState;
+  try {
+      if (userMessage.toLowerCase().trim() === 'resetear') {
+          await setUserState(from, 'IDLE', {});
+          await sendWhatsAppMessage(from, 'Estado reseteado. ✅');
+          return res.sendStatus(200);
+      }
+      
+      switch (status) {
+          case 'IDLE':
+          case 'AWAITING_MAIN_MENU_CHOICE':
+              if (userMessage === 'start_order') {
+                  const instructions = "Por favor, ingresa tu pedido. Puedes incluir varios productos.\n\n*(Por ej: 5 cajas de cerveza pilsen y 3 gaseosas)*";
+                  await sendWhatsAppMessage(from, instructions);
+                  await setUserState(from, 'AWAITING_ORDER_TEXT', { orderItems: [] });
+              } else {
+                  const mainMenu = { type: "button", body: { text: `¡Hola! Soy tu asistente virtual.` }, action: { buttons: [{ type: "reply", reply: { id: "start_order", title: "🛒 Realizar Pedido" } }, { type: "reply", reply: { id: "contact_agent", title: "🗣️ Hablar con asesor" } }] } };
+                  await sendWhatsAppMessage(from, '', 'interactive', mainMenu);
+                  await setUserState(from, 'AWAITING_MAIN_MENU_CHOICE', {});
+              }
+              break;
 
-    try {
-        if (userMessage.toLowerCase().trim() === 'resetear') {
-            await setUserState(from, 'IDLE', {});
-            await sendWhatsAppMessage(from, 'Estado reseteado. ✅');
-            return res.sendStatus(200);
-        }
-        
-        // ... (toda la lógica del switch case permanece igual)
-        switch (status) {
-            // ...
-        }
-    } catch (error) {
-        console.error('❌ ERROR en la lógica del bot:', error);
-    }
-    
-    res.sendStatus(200);
+          case 'AWAITING_ORDER_TEXT':
+              if (userMessage === 'back_to_cart') {
+                  await showCartSummary(from, data);
+                  break;
+              }
+              const foundProducts = await findProductsInCatalog(originalText);
+              if (foundProducts.length === 0) {
+                  await sendWhatsAppMessage(from, "Lo siento, no encontré productos que coincidan con tu búsqueda.");
+              } else if (foundProducts.length === 1) {
+                  data.pendingProduct = foundProducts[0];
+                  await sendWhatsAppMessage(from, `Encontré "${data.pendingProduct.productName}". ¿Qué cantidad necesitas?`);
+                  await setUserState(from, 'AWAITING_QUANTITY', data);
+              } else {
+                  let clarificationMenu;
+                  const validProducts = foundProducts.filter(p => p.shortName && p.sku);
+                  if (validProducts.length > 0 && validProducts.length <= 3) {
+                      clarificationMenu = { type: 'button', body: { text: `Para "${originalText}", ¿a cuál de estos te refieres?` }, action: { buttons: validProducts.map(p => ({ type: 'reply', reply: { id: p.sku, title: p.shortName } })) } };
+                  } else if (validProducts.length > 3) {
+                      clarificationMenu = { type: 'list', header: { type: 'text', text: 'Múltiples coincidencias' }, body: { text: `Para "${originalText}", ¿a cuál de estos te refieres?` }, action: { button: 'Ver opciones', sections: [{ title: 'Elige una presentación', rows: validProducts.slice(0, 10).map(p => ({ id: p.sku, title: p.shortName, description: p.productName })) }] } };
+                  } else {
+                      await sendWhatsAppMessage(from, "Lo siento, encontré coincidencias pero no pude generar las opciones.");
+                      break;
+                  }
+                  await sendWhatsAppMessage(from, '', 'interactive', clarificationMenu);
+                  await setUserState(from, 'AWAITING_CLARIFICATION', data);
+              }
+              break;
+          
+          case 'AWAITING_CLARIFICATION':
+              const productDoc = await db.collection('products').doc(userMessage).get();
+              if (productDoc.exists) {
+                  data.pendingProduct = productDoc.data();
+                  await sendWhatsAppMessage(from, `Seleccionaste "${data.pendingProduct.productName}". ¿Qué cantidad necesitas?`);
+                  await setUserState(from, 'AWAITING_QUANTITY', data);
+              }
+              break;
+
+          case 'AWAITING_QUANTITY':
+              const quantity = parseInt(userMessage);
+              if (isNaN(quantity) || quantity <= 0) {
+                  await sendWhatsAppMessage(from, "Por favor, ingresa una cantidad numérica válida.");
+                  break;
+              }
+              data.pendingQuantity = quantity;
+              const product = data.pendingProduct;
+
+              // --- ¡AQUÍ ESTÁ LA NUEVA LÓGICA! ---
+              // Si hay MÁS DE 1 unidad de medida, preguntamos.
+              if (product && product.availableUnits && product.availableUnits.length > 1) {
+                  const unitMenu = {
+                      type: 'button',
+                      body: { text: `Entendido, ${quantity}. ¿En qué unidad?` },
+                      action: {
+                          buttons: product.availableUnits.slice(0, 3).map(unit => ({
+                              type: 'reply',
+                              reply: { id: unit.toLowerCase(), title: unit }
+                          }))
+                      }
+                  };
+                  await sendWhatsAppMessage(from, '', 'interactive', unitMenu);
+                  await setUserState(from, 'AWAITING_UOM', data);
+              } else {
+                  // Si hay 1 o 0 unidades, la seleccionamos automáticamente y vamos al carrito.
+                  const unit = (product.availableUnits && product.availableUnits.length === 1) ? product.availableUnits[0] : 'unidad';
+                  const newOrderItem = { ...data.pendingProduct, quantity: data.pendingQuantity, unit: unit };
+                  if (!data.orderItems) data.orderItems = [];
+                  data.orderItems.push(newOrderItem);
+                  delete data.pendingProduct;
+                  delete data.pendingQuantity;
+                  await showCartSummary(from, data);
+              }
+              break;
+
+          case 'AWAITING_UOM':
+              const selectedUnit = userMessage;
+              const newOrderItem = { ...data.pendingProduct, quantity: data.pendingQuantity, unit: selectedUnit };
+              if (!data.orderItems) data.orderItems = [];
+              data.orderItems.push(newOrderItem);
+              delete data.pendingProduct;
+              delete data.pendingQuantity;
+              await showCartSummary(from, data);
+              break;
+
+          case 'AWAITING_ORDER_ACTION':
+              if (userMessage === 'add_more_products') {
+                  const askMoreMenu = { type: 'button', body: { text: "Claro, ¿qué más deseas añadir?" }, action: { buttons: [{ type: 'reply', reply: { id: 'back_to_cart', title: '↩️ Ver mi pedido' } }] } };
+                  await sendWhatsAppMessage(from, '', 'interactive', askMoreMenu);
+                  await setUserState(from, 'AWAITING_ORDER_TEXT', data);
+              } else if (userMessage === 'finish_order') {
+                  await sendWhatsAppMessage(from, "Perfecto. ¿Confirmas que este es tu pedido final? (sí/no)");
+                  await setUserState(from, 'AWAITING_FINAL_CONFIRMATION', data);
+              }
+              break;
+            
+          case 'AWAITING_FINAL_CONFIRMATION':
+              if (userMessage.toLowerCase().trim() === 'sí' || userMessage.toLowerCase().trim() === 'si') {
+                  const orderNumber = `PEDIDO-${Date.now()}`;
+                  const finalMessage = `¡Pedido confirmado! ✅\n\nTu número de orden es: *${orderNumber}*`;
+                  await db.collection('orders').add({ orderNumber, phoneNumber: from, status: 'CONFIRMED', orderDate: admin.firestore.FieldValue.serverTimestamp(), items: data.orderItems });
+                  await sendWhatsAppMessage(from, finalMessage);
+                  await setUserState(from, 'IDLE', {});
+              } else {
+                  await sendWhatsAppMessage(from, "Pedido cancelado. Puedes iniciar de nuevo.");
+                  await setUserState(from, 'IDLE', {});
+              }
+              break;
+
+          default:
+              await sendWhatsAppMessage(from, 'Lo siento, hubo un error. Empieza de nuevo.');
+              await setUserState(from, 'IDLE', {});
+              break;
+      }
+  } catch (error) {
+      console.error('❌ ERROR en la lógica del bot:', error);
+  }
+  
+  res.sendStatus(200);
 });
 
 app.listen(PORT, () => {
-    console.log(`Servidor escuchando en el puerto ${PORT}`);
+  console.log(`Servidor escuchando en el puerto ${PORT}`);
 });
