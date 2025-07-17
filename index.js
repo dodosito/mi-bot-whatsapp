@@ -29,7 +29,6 @@ async function setUserState(phoneNumber, status, data = {}) {
 
 
 // --- FUNCIÓN MEJORADA PARA ENVIAR MENSAJES DE WHATSAPP ---
-// Ahora puede enviar texto o mensajes interactivos con botones.
 async function sendWhatsAppMessage(to, messageBody, messageType = 'text', interactivePayload = null) {
     const payload = {
         messaging_product: 'whatsapp',
@@ -39,7 +38,7 @@ async function sendWhatsAppMessage(to, messageBody, messageType = 'text', intera
 
     if (messageType === 'text') {
         payload.text = { body: messageBody };
-    } else if (messageType === 'interactive') {
+    } else if (messageType === 'interactive' && interactivePayload) {
         payload.interactive = interactivePayload;
     }
 
@@ -104,13 +103,11 @@ app.post('/webhook', async (req, res) => {
     const timestamp = new Date(parseInt(message.timestamp) * 1000);
 
     let userMessage;
-    // --- NUEVA LÓGICA: CAPTURAR TEXTO O CLIC DE BOTÓN ---
     if (messageType === 'text') {
         userMessage = message.text.body.toLowerCase().trim();
     } else if (messageType === 'interactive' && message.interactive?.type === 'button_reply') {
-        userMessage = message.interactive.button_reply.id; // Capturamos el ID del botón
+        userMessage = message.interactive.button_reply.id;
     } else {
-        // Si no es texto ni un botón que entendamos, salimos.
         await sendWhatsAppMessage(from, 'Lo siento, solo puedo procesar mensajes de texto o botones.');
         return res.sendStatus(200);
     }
@@ -120,19 +117,21 @@ app.post('/webhook', async (req, res) => {
     const currentUserState = await getUserState(from);
     let currentStatus = currentUserState.status;
     let currentData = currentUserState.data || {};
-    let botResponse = 'Respuesta por defecto.';
+    let botResponse = 'Respuesta por defecto.'; // Esta variable ahora es solo para el log
 
     try {
         if (userMessage === 'cancelar') {
             await setUserState(from, 'IDLE', {});
             await sendWhatsAppMessage(from, 'Operación cancelada. ¿Necesitas algo más?');
+            // Guardamos la conversación antes de salir
+            await db.collection('conversations').add({ phoneNumber: from, userMessage, botResponse: 'Operación cancelada.', status: currentStatus, timestamp, messageId });
             return res.sendStatus(200);
         }
 
         switch (currentStatus) {
             case 'IDLE':
-                // --- CAMBIO PRINCIPAL: ENVIAR MENÚ EN LUGAR DE ESPERAR "pedir" ---
                 const mainMenu = {
+                    type: "button",  // <--- ¡AQUÍ ESTÁ LA CORRECCIÓN!
                     header: { type: "text", text: "¡Hola! 👋" },
                     body: { text: `Bienvenido. Soy tu asistente virtual. ¿Cómo puedo ayudarte hoy?` },
                     footer: { text: "Selecciona una opción" },
@@ -144,7 +143,8 @@ app.post('/webhook', async (req, res) => {
                     }
                 };
                 await sendWhatsAppMessage(from, '', 'interactive', mainMenu);
-                await setUserState(from, 'AWAITING_MAIN_MENU_CHOICE', {}); // Nuevo estado de espera
+                await setUserState(from, 'AWAITING_MAIN_MENU_CHOICE', {});
+                botResponse = 'Menú principal enviado.'; // Para el log
                 break;
 
             case 'AWAITING_MAIN_MENU_CHOICE':
@@ -155,7 +155,7 @@ app.post('/webhook', async (req, res) => {
                 } else if (userMessage === 'contact_agent') {
                     botResponse = 'Entendido. Un asesor se pondrá en contacto contigo en breve.';
                     await sendWhatsAppMessage(from, botResponse);
-                    await setUserState(from, 'IDLE', {}); // Resetear estado
+                    await setUserState(from, 'IDLE', {});
                 } else {
                     botResponse = 'Por favor, selecciona una opción válida de los botones.';
                     await sendWhatsAppMessage(from, botResponse);
@@ -210,7 +210,11 @@ app.post('/webhook', async (req, res) => {
 
     } catch (error) {
         console.error('❌ ERROR en la lógica del bot:', error);
-        await sendWhatsAppMessage(from, 'Lo siento, ocurrió un error inesperado. Intenta de nuevo.');
+        try {
+            await sendWhatsAppMessage(from, 'Lo siento, ocurrió un error inesperado. Intenta de nuevo.');
+        } catch (sendError) {
+            console.error('❌ ERROR al enviar mensaje de error al usuario:', sendError);
+        }
         await setUserState(from, 'IDLE', {});
     }
   }
