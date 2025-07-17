@@ -6,22 +6,19 @@ app.use(express.json());
 
 // --- CONFIGURACIÓN DE FIREBASE/FIRESTORE ---
 const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY);
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
-  // Evitar sobreescribir si ya está inicializado (útil para scripts)
-  ...(admin.apps.length ? { app: admin.apps[0] } : {})
-});
+// Evita el error de reinicialización en entornos de desarrollo
+if (!admin.apps.length) {
+  admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount)
+  });
+}
 const db = admin.firestore();
 
-// --- FUNCIONES DE ESTADO Y MENSAJERÍA (Sin cambios) ---
+// --- FUNCIONES DE ESTADO Y MENSAJERÍA ---
 async function getUserState(phoneNumber) {
     const userStateRef = db.collection('user_states').doc(phoneNumber);
     const doc = await userStateRef.get();
-    if (doc.exists) {
-        return doc.data();
-    } else {
-        return { status: 'IDLE', data: {} };
-    }
+    return doc.exists ? doc.data() : { status: 'IDLE', data: {} };
 }
 
 async function setUserState(phoneNumber, status, data = {}) {
@@ -46,12 +43,7 @@ async function sendWhatsAppMessage(to, messageBody, messageType = 'text', intera
         await axios.post(
             `https://graph.facebook.com/v19.0/${process.env.PHONE_NUMBER_ID}/messages`,
             payload,
-            {
-                headers: {
-                    'Authorization': `Bearer ${process.env.WHATSAPP_TOKEN}`,
-                    'Content-Type': 'application/json',
-                },
-            }
+            { headers: { 'Authorization': `Bearer ${process.env.WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' } }
         );
         console.log(`✅ Mensaje tipo '${messageType}' enviado a ${to}.`);
     } catch (error) {
@@ -59,7 +51,7 @@ async function sendWhatsAppMessage(to, messageBody, messageType = 'text', intera
     }
 }
 
-// --- NUEVA FUNCIÓN: BUSCAR PRODUCTOS EN FIRESTORE ---
+// --- FUNCIÓN DE BÚSQUEDA DE PRODUCTOS ---
 async function findProductsInCatalog(text) {
     console.log(`🔎 Buscando productos para el texto: "${text}"`);
     const searchKeywords = text.toLowerCase().split(' ').filter(word => word.length > 2);
@@ -73,15 +65,12 @@ async function findProductsInCatalog(text) {
         return [];
     }
 
-    const foundProducts = [];
-    snapshot.forEach(doc => {
-        foundProducts.push(doc.data());
-    });
+    const foundProducts = snapshot.docs.map(doc => doc.data());
     console.log(`✨ Productos encontrados:`, foundProducts.map(p => p.productName));
     return foundProducts;
 }
 
-// --- VARIABLES DE ENTORNO Y RUTAS (Sin cambios) ---
+// --- VARIABLES DE ENTORNO Y RUTAS ---
 const PORT = process.env.PORT || 3000;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 
@@ -114,9 +103,9 @@ app.post('/webhook', async (req, res) => {
   if (messageType === 'text') {
       userMessage = message.text.body.toLowerCase().trim();
       originalText = message.text.body;
-  } else if (messageType === 'interactive' && message.interactive?.type === 'button_reply') {
+  } else if (message.interactive?.type === 'button_reply') {
       userMessage = message.interactive.button_reply.id;
-  } else if (messageType === 'interactive' && message.interactive?.type === 'list_reply') {
+  } else if (message.interactive?.type === 'list_reply') {
       userMessage = message.interactive.list_reply.id;
   } else {
       await sendWhatsAppMessage(from, 'Lo siento, solo puedo procesar mensajes de texto o botones.');
@@ -170,11 +159,11 @@ app.post('/webhook', async (req, res) => {
                       action: {
                           button: 'Ver opciones',
                           sections: [{
-                              title: 'Elige una presentación', // <--- ¡AQUÍ ESTÁ LA CORRECCIÓN!
+                              title: 'Elige una presentación',
                               rows: foundProducts.map(p => ({
                                   id: p.sku,
-                                  title: p.productName,
-                                  description: p.category // Opcional: añade descripción a la fila
+                                  title: p.shortName,       // <-- CAMBIO CLAVE: Usamos el nombre corto
+                                  description: p.productName  // <-- CAMBIO CLAVE: Y el largo en la descripción
                               }))
                           }]
                       }
@@ -189,8 +178,8 @@ app.post('/webhook', async (req, res) => {
               const productsRef = db.collection('products').doc(selectedSku);
               const doc = await productsRef.get();
               if (!doc.exists) {
-                  await sendWhatsAppMessage(from, "Hubo un error al seleccionar el producto. Por favor, intenta de nuevo.");
-                  await setUserState(from, 'AWAITING_ORDER_TEXT', currentData);
+                  await sendWhatsAppMessage(from, "Hubo un error al seleccionar el producto. Intenta de nuevo.");
+                  await setUserState(from, 'AWAIT-ORDER_TEXT', currentData);
               } else {
                   const selectedProduct = doc.data();
                   await sendWhatsAppMessage(from, `Seleccionaste "${selectedProduct.productName}". ¿Qué cantidad necesitas?`);
