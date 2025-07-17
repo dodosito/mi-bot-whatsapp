@@ -48,13 +48,42 @@ async function sendWhatsAppMessage(to, messageBody, messageType = 'text', intera
     }
 }
 
+
+// --- ¡ESTA ES LA ÚNICA FUNCIÓN MODIFICADA! ---
 async function findProductsInCatalog(text) {
+    console.log(`🔎 Buscando productos para el texto: "${text}"`);
     const searchKeywords = text.toLowerCase().split(' ').filter(word => word.length > 2);
     if (searchKeywords.length === 0) return [];
-    const snapshot = await db.collection('products').where('searchTerms', 'array-contains-any', searchKeywords).get();
-    if (snapshot.empty) return [];
-    return snapshot.docs.map(doc => doc.data());
+    
+    const productsRef = db.collection('products');
+    const snapshot = await productsRef.where('searchTerms', 'array-contains-any', searchKeywords).get();
+
+    if (snapshot.empty) {
+        console.log('No se encontraron productos en la fase inicial.');
+        return [];
+    }
+
+    // Calculamos una puntuación de relevancia para cada producto
+    let maxScore = 0;
+    const scoredProducts = snapshot.docs.map(doc => {
+        const product = doc.data();
+        let score = 0;
+        searchKeywords.forEach(keyword => {
+            if (product.searchTerms.includes(keyword)) {
+                score++;
+            }
+        });
+        if (score > maxScore) maxScore = score;
+        return { ...product, score };
+    });
+
+    // Filtramos para quedarnos solo con los productos con la máxima puntuación
+    const bestMatches = scoredProducts.filter(p => p.score === maxScore);
+
+    console.log(`✨ Mejores coincidencias encontradas:`, bestMatches.map(p => p.productName));
+    return bestMatches;
 }
+
 
 async function showCartSummary(from, data) {
     let summary = "Este es tu pedido hasta ahora:\n\n";
@@ -179,9 +208,6 @@ app.post('/webhook', async (req, res) => {
               }
               data.pendingQuantity = quantity;
               const product = data.pendingProduct;
-
-              // --- ¡AQUÍ ESTÁ LA NUEVA LÓGICA! ---
-              // Si hay MÁS DE 1 unidad de medida, preguntamos.
               if (product && product.availableUnits && product.availableUnits.length > 1) {
                   const unitMenu = {
                       type: 'button',
@@ -196,7 +222,6 @@ app.post('/webhook', async (req, res) => {
                   await sendWhatsAppMessage(from, '', 'interactive', unitMenu);
                   await setUserState(from, 'AWAITING_UOM', data);
               } else {
-                  // Si hay 1 o 0 unidades, la seleccionamos automáticamente y vamos al carrito.
                   const unit = (product.availableUnits && product.availableUnits.length === 1) ? product.availableUnits[0] : 'unidad';
                   const newOrderItem = { ...data.pendingProduct, quantity: data.pendingQuantity, unit: unit };
                   if (!data.orderItems) data.orderItems = [];
@@ -227,7 +252,7 @@ app.post('/webhook', async (req, res) => {
                   await setUserState(from, 'AWAITING_FINAL_CONFIRMATION', data);
               }
               break;
-            
+          
           case 'AWAITING_FINAL_CONFIRMATION':
               if (userMessage.toLowerCase().trim() === 'sí' || userMessage.toLowerCase().trim() === 'si') {
                   const orderNumber = `PEDIDO-${Date.now()}`;
