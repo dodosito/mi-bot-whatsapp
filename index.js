@@ -27,8 +27,7 @@ async function setUserState(phoneNumber, status, data = {}) {
     await userStateRef.set({ status, data, lastUpdated: admin.firestore.FieldValue.serverTimestamp() });
 }
 
-
-// --- FUNCIÓN MEJORADA PARA ENVIAR MENSAJES DE WHATSAPP ---
+// --- FUNCIÓN PARA ENVIAR MENSAJES DE WHATSAPP ---
 async function sendWhatsAppMessage(to, messageBody, messageType = 'text', interactivePayload = null) {
     const payload = {
         messaging_product: 'whatsapp',
@@ -59,43 +58,37 @@ async function sendWhatsAppMessage(to, messageBody, messageType = 'text', intera
     }
 }
 
-
-// --- TUS SECRETOS (VARIABLES DE ENTORNO) ---
+// --- VARIABLES DE ENTORNO ---
 const PORT = process.env.PORT || 3000;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 
-
-// --- RUTA PARA EL CHEQUEO DE SALUD DE RAILWAY ---
+// --- RUTA PARA EL CHEQUEO DE SALUD ---
 app.get('/health', (req, res) => {
   res.sendStatus(200);
 });
 
-// --- RUTA PARA LA VERIFICACIÓN DE META (Webhook GET) ---
+// --- RUTA DE VERIFICACIÓN DEL WEBHOOK ---
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
 
-  if (mode && token) {
-    if (mode === 'subscribe' && token === VERIFY_TOKEN) {
-      console.log('WEBHOOK_VERIFICADO ✅');
-      res.status(200).send(challenge);
-    } else {
-      res.sendStatus(403);
-    }
+  if (mode && token && mode === 'subscribe' && token === VERIFY_TOKEN) {
+    console.log('WEBHOOK_VERIFICADO ✅');
+    res.status(200).send(challenge);
   } else {
-    res.sendStatus(400);
+    res.sendStatus(403);
   }
 });
 
-// --- RUTA PRINCIPAL PARA RECIBIR MENSAJES DE WHATSAPP ---
+// --- RUTA PRINCIPAL PARA RECIBIR MENSAJES ---
 app.post('/webhook', async (req, res) => {
-  const body = req.body;
-  // Solo procesamos si es un mensaje de usuario, ignoramos los webhooks de estado.
-  if (!body.entry?.[0]?.changes?.[0]?.value?.messages?.[0]) {
+  // Ignoramos los webhooks de estado, solo procesamos mensajes de usuarios.
+  if (!req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0]) {
     return res.sendStatus(200);
   }
   
+  const body = req.body;
   console.log('📥 WEBHOOK DE MENSAJE RECIBIDO:', JSON.stringify(body, null, 2));
     
   const message = body.entry[0].changes[0].value.messages[0];
@@ -119,113 +112,96 @@ app.post('/webhook', async (req, res) => {
   const currentUserState = await getUserState(from);
   let currentStatus = currentUserState.status;
   let currentData = currentUserState.data || {};
-  let botResponse = 'Respuesta por defecto.';
+  let botResponseLog = 'Respuesta por defecto.'; // Variable para guardar en el log
 
   try {
-      // --- NUEVO COMANDO DE RESETEO ---
       if (userMessage === 'resetear') {
           await setUserState(from, 'IDLE', {});
           await sendWhatsAppMessage(from, 'Estado reseteado. ✅');
-          console.log(`🛠️ Estado reseteado para ${from}`);
-          // Guardamos la conversación antes de salir
-          await db.collection('conversations').add({ phoneNumber: from, userMessage, botResponse: 'Estado reseteado.', status: 'RESET', timestamp, messageId });
-          return res.sendStatus(200);
+          botResponseLog = 'Estado reseteado.';
+      } else {
+        switch (currentStatus) {
+            case 'IDLE':
+                const mainMenu = {
+                    type: "button",
+                    body: { text: `¡Hola! Soy tu asistente virtual. ¿Cómo puedo ayudarte hoy?` },
+                    action: {
+                        buttons: [
+                            { type: "reply", reply: { id: "start_order", title: "🛒 Realizar Pedido" } },
+                            { type: "reply", reply: { id: "contact_agent", title: "🗣️ Hablar con asesor" } }
+                        ]
+                    }
+                };
+                await sendWhatsAppMessage(from, '', 'interactive', mainMenu);
+                await setUserState(from, 'AWAITING_MAIN_MENU_CHOICE', {});
+                botResponseLog = 'Menú principal enviado.';
+                break;
+
+            case 'AWAITING_MAIN_MENU_CHOICE':
+                if (userMessage === 'start_order') {
+                    // **CAMBIO 1: ENVIAR MENSAJE DE INSTRUCCIÓN**
+                    const instructions = "Por favor, ingresa tu pedido. Puedes incluir varios productos, con sus cantidades y unidades.\n\n*(Por ej: 5 cajas de cerveza pilsen y 3 paquetes de gaseosa)*";
+                    await sendWhatsAppMessage(from, instructions);
+                    await setUserState(from, 'AWAITING_ORDER_TEXT', { orderItems: [] }); // Nuevo estado y carrito vacío
+                    botResponseLog = 'Instrucciones de pedido enviadas.';
+                } else if (userMessage === 'contact_agent') {
+                    await sendWhatsAppMessage(from, 'Entendido. Un asesor se pondrá en contacto contigo en breve.');
+                    await setUserState(from, 'IDLE', {});
+                    botResponseLog = 'Solicitó hablar con asesor.';
+                } else {
+                    await sendWhatsAppMessage(from, 'Por favor, selecciona una opción válida de los botones.');
+                    botResponseLog = 'Opción de menú inválida.';
+                }
+                break;
+
+            // **CAMBIO 2: NUEVO ESTADO PARA PROCESAR EL TEXTO DEL PEDIDO**
+            // (Por ahora, es una simulación simple. La IA la conectaremos en el siguiente paso)
+            case 'AWAITING_ORDER_TEXT':
+                // Simulación: Suponemos que el texto es un solo producto para simplificar
+                const productText = message.text.body; // Usamos el texto original
+                currentData.product = productText;
+                currentData.quantity = 1; // Cantidad por defecto
+                
+                const confirmationMessage = `He entendido:\n\n- 1 unidad de "${productText}"\n\n¿Es correcto? (sí/no)`;
+                await sendWhatsAppMessage(from, confirmationMessage);
+                await setUserState(from, 'AWAITING_CONFIRMATION', currentData);
+                botResponseLog = `Pedido simulado para confirmar: ${productText}`;
+                break;
+
+            case 'AWAITING_CONFIRMATION':
+                if (userMessage === 'sí' || userMessage === 'si') {
+                    // **CAMBIO 3: GENERAR NÚMERO DE PEDIDO Y MOSTRARLO**
+                    const orderNumber = `PEDIDO-${Date.now()}`;
+                    const finalMessage = `¡Pedido confirmado! ✅\n\nTu número de orden es: *${orderNumber}*\n\nGracias por tu compra.`;
+                    
+                    await db.collection('orders').add({ ...currentData, orderNumber, phoneNumber: from, status: 'CONFIRMED', orderDate: admin.firestore.FieldValue.serverTimestamp() });
+                    await sendWhatsAppMessage(from, finalMessage);
+                    await setUserState(from, 'IDLE', {});
+                    botResponseLog = `Pedido confirmado con ID: ${orderNumber}`;
+                } else {
+                    await sendWhatsAppMessage(from, 'Pedido cancelado. Si deseas, puedes iniciar de nuevo enviando "hola".');
+                    await setUserState(from, 'IDLE', {});
+                    botResponseLog = 'Pedido cancelado por el usuario.';
+                }
+                break;
+
+            default:
+                await sendWhatsAppMessage(from, 'Lo siento, hubo un error. Por favor, empieza de nuevo enviando "hola".');
+                await setUserState(from, 'IDLE', {});
+                botResponseLog = 'Error, estado desconocido reseteado a IDLE.';
+                break;
+        }
       }
 
-      if (userMessage === 'cancelar') {
-          await setUserState(from, 'IDLE', {});
-          await sendWhatsAppMessage(from, 'Operación cancelada. ¿Necesitas algo más?');
-          await db.collection('conversations').add({ phoneNumber: from, userMessage, botResponse: 'Operación cancelada.', status: currentStatus, timestamp, messageId });
-          return res.sendStatus(200);
-      }
-
-      switch (currentStatus) {
-          case 'IDLE':
-              const mainMenu = {
-                  type: "button",
-                  header: { type: "text", text: "¡Hola! 👋" },
-                  body: { text: `Bienvenido. Soy tu asistente virtual. ¿Cómo puedo ayudarte hoy?` },
-                  footer: { text: "Selecciona una opción" },
-                  action: {
-                      buttons: [
-                          { type: "reply", reply: { id: "start_order", title: "🛒 Realizar Pedido" } },
-                          { type: "reply", reply: { id: "contact_agent", title: "🗣️ Hablar con asesor" } }
-                      ]
-                  }
-              };
-              await sendWhatsAppMessage(from, '', 'interactive', mainMenu);
-              await setUserState(from, 'AWAITING_MAIN_MENU_CHOICE', {});
-              botResponse = 'Menú principal enviado.';
-              break;
-
-          case 'AWAITING_MAIN_MENU_CHOICE':
-              if (userMessage === 'start_order') {
-                  botResponse = '¡Claro! ¿Qué producto te gustaría pedir?';
-                  await sendWhatsAppMessage(from, botResponse);
-                  await setUserState(from, 'AWAITING_PRODUCT', {});
-              } else if (userMessage === 'contact_agent') {
-                  botResponse = 'Entendido. Un asesor se pondrá en contacto contigo en breve.';
-                  await sendWhatsAppMessage(from, botResponse);
-                  await setUserState(from, 'IDLE', {});
-              } else {
-                  botResponse = 'Por favor, selecciona una opción válida de los botones.';
-                  await sendWhatsAppMessage(from, botResponse);
-              }
-              break;
-
-          // ... (el resto de los casos no cambian)
-          case 'AWAITING_PRODUCT':
-              currentData.product = message.text.body; // Guardar con mayúsculas/minúsculas originales
-              botResponse = `Ok, "${currentData.product}". ¿Qué cantidad necesitas?`;
-              await sendWhatsAppMessage(from, botResponse);
-              await setUserState(from, 'AWAITING_QUANTITY', currentData);
-              break;
-
-          case 'AWAITING_QUANTITY':
-              const quantity = parseInt(userMessage);
-              if (!isNaN(quantity) && quantity > 0) {
-                  currentData.quantity = quantity;
-                  botResponse = `Perfecto. ¿Confirmas tu pedido de ${currentData.quantity} de "${currentData.product}"? (sí/no)`;
-                  await sendWhatsAppMessage(from, botResponse);
-                  await setUserState(from, 'AWAITING_CONFIRMATION', currentData);
-              } else {
-                  botResponse = 'Por favor, ingresa una cantidad numérica válida.';
-                  await sendWhatsAppMessage(from, botResponse);
-              }
-              break;
-
-          case 'AWAITING_CONFIRMATION':
-              if (userMessage === 'sí' || userMessage === 'si') {
-                  botResponse = `¡Pedido confirmado! Tu orden de ${currentData.quantity} de "${currentData.product}" ha sido registrada.`;
-                  await db.collection('orders').add({ ...currentData, phoneNumber: from, status: 'CONFIRMED', orderDate: admin.firestore.FieldValue.serverTimestamp() });
-                  await sendWhatsAppMessage(from, botResponse);
-                  await setUserState(from, 'IDLE', {});
-              } else {
-                  botResponse = 'Pedido cancelado. Si deseas, puedes iniciar de nuevo.';
-                  await sendWhatsAppMessage(from, botResponse);
-                  await setUserState(from, 'IDLE', {});
-              }
-              break;
-
-          default:
-              botResponse = 'Lo siento, hubo un error y me perdí. Empecemos de nuevo.';
-              await sendWhatsAppMessage(from, botResponse);
-              await setUserState(from, 'IDLE', {});
-              break;
-      }
-
+      // Guardar la conversación en Firestore
       await db.collection('conversations').add({
-        phoneNumber: from, userMessage, botResponse, status: currentStatus, timestamp, messageId
+        phoneNumber: from, userMessage, botResponse: botResponseLog, status: currentStatus, timestamp, messageId
       });
       console.log('💾 Conversación guardada en Firestore.');
 
   } catch (error) {
       console.error('❌ ERROR en la lógica del bot:', error);
-      try {
-          await sendWhatsAppMessage(from, 'Lo siento, ocurrió un error inesperado. Intenta de nuevo.');
-      } catch (sendError) {
-          console.error('❌ ERROR al enviar mensaje de error al usuario:', sendError);
-      }
+      await sendWhatsAppMessage(from, 'Lo siento, ocurrió un error inesperado. Intenta de nuevo.');
       await setUserState(from, 'IDLE', {});
   }
   
