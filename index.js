@@ -132,90 +132,90 @@ app.post('/webhook', async (req, res) => {
       let currentData = currentUserState.data || {}; // Datos asociados al estado actual
 
       try {
-        // --- LÓGICA DE FLUJOS DE CONVERSACIÓN ---
-        switch (currentStatus) {
-            case 'IDLE':
-                if (userMessage === 'quiero pedir' || userMessage === 'pedir') {
-                    botResponse = '¡Claro! ¿Qué producto te gustaría pedir?';
-                    await setUserState(from, 'AWAITING_PRODUCT', {}); // Establecer nuevo estado y resetear datos
-                } else {
-                    // Comportamiento por defecto: enviar a OpenRouter si no está en un flujo
-                    const openRouterResponse = await axios.post(
-                        'https://openrouter.ai/api/v1/chat/completions',
-                        {
-                            model: 'moonshotai/kimi-k2:free',
-                            messages: [{ role: 'user', content: userMessage }],
-                        },
-                        {
-                            headers: {
-                                'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
-                                'Content-Type': 'application/json',
+        // --- MANEJO GLOBAL DE CANCELACIÓN ---
+        // Si el usuario dice "cancelar" en cualquier momento, se resetea el flujo
+        if (userMessage.includes('cancelar')) {
+            botResponse = 'Operación cancelada. ¿Hay algo más en lo que pueda ayudarte?';
+            await setUserState(from, 'IDLE', {}); // Volver a IDLE
+        } else {
+            // --- LÓGICA DE FLUJOS DE CONVERSACIÓN ---
+            switch (currentStatus) {
+                case 'IDLE':
+                    // Reconocimiento más flexible para iniciar pedido
+                    if (userMessage.includes('pedir') || userMessage.includes('comprar') || userMessage.includes('ordenar')) {
+                        botResponse = '¡Claro! ¿Qué producto te gustaría pedir?';
+                        await setUserState(from, 'AWAITING_PRODUCT', {}); // Establecer nuevo estado y resetear datos
+                    } else {
+                        // Comportamiento por defecto: enviar a OpenRouter si no está en un flujo
+                        const openRouterResponse = await axios.post(
+                            'https://openrouter.ai/api/v1/chat/completions',
+                            {
+                                model: 'moonshotai/kimi-k2:free',
+                                messages: [{ role: 'user', content: userMessage }],
                             },
-                            timeout: 15000
-                        }
-                    );
-                    botResponse = openRouterResponse.data.choices[0].message.content;
-                }
-                break;
+                            {
+                                headers: {
+                                    'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+                                    'Content-Type': 'application/json',
+                                },
+                                timeout: 15000
+                            }
+                        );
+                        botResponse = openRouterResponse.data.choices[0].message.content;
+                    }
+                    break;
 
-            case 'AWAITING_PRODUCT':
-                if (userMessage === 'cancelar pedido') {
-                    botResponse = 'Pedido cancelado. ¿Hay algo más en lo que pueda ayudarte?';
-                    await setUserState(from, 'IDLE', {}); // Volver a IDLE
-                } else {
-                    currentData.product = userMessage; // Guardar el producto
-                    botResponse = `¿Cuántas unidades de ${currentData.product} necesitas?`;
+                case 'AWAITING_PRODUCT':
+                    currentData.product = userMessage; // Guardar el producto (el mensaje completo del usuario)
+                    botResponse = `¿Cuántas unidades de "${currentData.product}" necesitas?`;
                     await setUserState(from, 'AWAITING_QUANTITY', currentData); // Avanzar al siguiente estado
-                }
-                break;
+                    break;
 
-            case 'AWAITING_QUANTITY':
-                const quantity = parseInt(userMessage); // Intentar convertir el mensaje a número
-                if (userMessage === 'cancelar pedido') {
-                    botResponse = 'Pedido cancelado. ¿Hay algo más en lo que pueda ayudarte?';
-                    await setUserState(from, 'IDLE', {}); // Volver a IDLE
-                } else if (!isNaN(quantity) && quantity > 0) { // Validar que sea un número positivo
-                    currentData.quantity = quantity; // Guardar la cantidad
-                    botResponse = `¿Confirmas tu pedido de ${currentData.quantity} unidades de ${currentData.product}? (Sí/No)`;
-                    await setUserState(from, 'AWAITING_CONFIRMATION', currentData); // Avanzar al siguiente estado
-                } else {
-                    botResponse = 'Por favor, ingresa una cantidad válida (un número positivo).';
-                    // Mantenerse en el mismo estado si la entrada es inválida
-                }
-                break;
+                case 'AWAITING_QUANTITY':
+                    const quantity = parseInt(userMessage); // Intentar convertir el mensaje a número
+                    if (!isNaN(quantity) && quantity > 0) { // Validar que sea un número positivo
+                        currentData.quantity = quantity; // Guardar la cantidad
+                        botResponse = `¿Confirmas tu pedido de ${currentData.quantity} unidades de "${currentData.product}"? (Sí/No)`;
+                        await setUserState(from, 'AWAITING_CONFIRMATION', currentData); // Avanzar al siguiente estado
+                    } else {
+                        botResponse = 'Por favor, ingresa una cantidad válida (un número positivo).';
+                        // Mantenerse en el mismo estado si la entrada es inválida
+                    }
+                    break;
 
-            case 'AWAITING_CONFIRMATION':
-                if (userMessage === 'sí' || userMessage === 'si') {
-                    botResponse = `¡Pedido de ${currentData.quantity} unidades de ${currentData.product} confirmado! Te avisaremos cuando esté listo.`;
-                    // --- AQUÍ SE INTEGRARÍA CON SAP EN EL FUTURO ---
-                    console.log('🎉 Pedido finalizado y confirmado:', currentData);
-                    await setUserState(from, 'IDLE', {}); // Resetear estado después de completar el pedido
+                case 'AWAITING_CONFIRMATION':
+                    if (userMessage === 'sí' || userMessage === 'si') {
+                        botResponse = `¡Pedido de ${currentData.quantity} unidades de "${currentData.product}" confirmado! Te avisaremos cuando esté listo.`;
+                        // --- AQUÍ SE INTEGRARÍA CON SAP EN EL FUTURO ---
+                        console.log('🎉 Pedido finalizado y confirmado:', currentData);
+                        await setUserState(from, 'IDLE', {}); // Resetear estado después de completar el pedido
 
-                    // Opcional: Guardar el pedido final en una colección separada 'orders'
-                    await db.collection('orders').add({
-                        phoneNumber: from,
-                        product: currentData.product,
-                        quantity: currentData.quantity,
-                        status: 'CONFIRMED',
-                        orderDate: admin.firestore.FieldValue.serverTimestamp()
-                    });
-                    console.log('💾 Pedido guardado en la colección "orders".');
+                        // Opcional: Guardar el pedido final en una colección separada 'orders'
+                        await db.collection('orders').add({
+                            phoneNumber: from,
+                            product: currentData.product,
+                            quantity: currentData.quantity,
+                            status: 'CONFIRMED',
+                            orderDate: admin.firestore.FieldValue.serverTimestamp()
+                        });
+                        console.log('💾 Pedido guardado en la colección "orders".');
 
-                } else if (userMessage === 'no' || userMessage === 'cancelar pedido') {
-                    botResponse = 'Pedido cancelado. ¿Hay algo más en lo que pueda ayudarte?';
-                    await setUserState(from, 'IDLE', {}); // Volver a IDLE
-                } else {
-                    botResponse = 'Por favor, responde "Sí" para confirmar o "No" para cancelar el pedido.';
-                    // Mantenerse en el mismo estado si la entrada es inválida
-                }
-                break;
+                    } else if (userMessage === 'no') {
+                        botResponse = 'Pedido cancelado. ¿Hay algo más en lo que pueda ayudarte?';
+                        await setUserState(from, 'IDLE', {}); // Volver a IDLE
+                    } else {
+                        botResponse = 'Por favor, responde "Sí" para confirmar o "No" para cancelar el pedido.';
+                        // Mantenerse en el mismo estado si la entrada es inválida
+                    }
+                    break;
 
-            default:
-                // Si el estado es desconocido o inválido, se resetea a IDLE
-                botResponse = 'Lo siento, hubo un error en el flujo de conversación. Por favor, di "cancelar pedido" para empezar de nuevo.';
-                await setUserState(from, 'IDLE', {});
-                break;
-        }
+                default:
+                    // Si el estado es desconocido o inválido, se resetea a IDLE
+                    botResponse = 'Lo siento, hubo un error en el flujo de conversación. Por favor, di "cancelar" para empezar de nuevo.';
+                    await setUserState(from, 'IDLE', {});
+                    break;
+            }
+        } // Fin del else del manejo global de cancelación
 
         // Enviar la respuesta determinada por el bot a WhatsApp
         await axios.post(
