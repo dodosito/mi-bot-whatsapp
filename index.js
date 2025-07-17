@@ -498,18 +498,4 @@ app.post('/webhook', async (req, res) => {
         console.error('❌ ERROR al guardar en Firestore:', dbError.message);
       }
 
-    } else {
-      console.log(`Mensaje no es de texto ni interactivo. Tipo: ${messageType}`);
-      await sendWhatsAppMessage(from, 'Lo siento, por ahora solo puedo procesar mensajes de texto y selecciones de menú.');
-    }
-  } else {
-    console.log('El webhook recibido no contiene un mensaje de WhatsApp válido o no es de una cuenta de negocio.');
-  }
-  res.sendStatus(200); // Siempre responde 200 OK a WhatsApp para que no reintente
-});
-
-// --- INSTRUCCIÓN FINAL PARA QUE EL BOT SE QUEDE ENCENDIDO ---
-app.listen(PORT, () => {
-  console.log(`Servidor escuchando en http://localhost:${PORT}`);
-  console.log('¡El bot está vivo y esperando mensajes! 🚀');
-});
+    
