@@ -15,6 +15,35 @@ admin.initializeApp({
 
 const db = admin.firestore(); // Obtiene una referencia a la base de datos Firestore
 
+// --- FUNCIONES PARA GESTIONAR EL ESTADO DEL USUARIO EN FIRESTORE ---
+/**
+ * Obtiene el estado actual de un usuario desde Firestore.
+ * Si el usuario no tiene un estado registrado, devuelve un estado 'IDLE' por defecto.
+ * @param {string} phoneNumber - El número de teléfono del usuario.
+ * @returns {Promise<object>} El objeto de estado del usuario.
+ */
+async function getUserState(phoneNumber) {
+    const userStateRef = db.collection('user_states').doc(phoneNumber);
+    const doc = await userStateRef.get();
+    if (doc.exists) {
+        return doc.data();
+    } else {
+        // Estado por defecto si no hay registro
+        return { status: 'IDLE', data: {} };
+    }
+}
+
+/**
+ * Establece o actualiza el estado de un usuario en Firestore.
+ * @param {string} phoneNumber - El número de teléfono del usuario.
+ * @param {string} status - El nuevo estado del usuario (ej. 'IDLE', 'AWAITING_PRODUCT').
+ * @param {object} data - Datos adicionales para guardar con el estado (ej. producto, cantidad).
+ */
+async function setUserState(phoneNumber, status, data = {}) {
+    const userStateRef = db.collection('user_states').doc(phoneNumber);
+    await userStateRef.set({ status, data, lastUpdated: admin.firestore.FieldValue.serverTimestamp() });
+}
+
 // --- RUTA PARA EL CHEQUEO DE SALUD DE RAILWAY ---
 // Esta ruta es solo para Railway. Siempre responde 200 OK para que Railway sepa que el bot está vivo.
 app.get('/health', (req, res) => {
@@ -94,60 +123,151 @@ app.post('/webhook', async (req, res) => {
     }
 
     if (messageType === 'text') {
-      const userMessage = message.text.body;
+      const userMessage = message.text.body.toLowerCase().trim(); // Convertir a minúsculas y quitar espacios
       console.log(`💬 Mensaje de ${from}: ${userMessage}`);
 
-      let botResponse = 'Lo siento, no pude obtener una respuesta en este momento.'; // Default response
+      let botResponse = 'Lo siento, no pude obtener una respuesta en este momento.'; // Respuesta por defecto
+      let currentUserState = await getUserState(from); // Obtener el estado actual del usuario
+      let currentStatus = currentUserState.status;
+      let currentData = currentUserState.data || {}; // Datos asociados al estado actual
 
       try {
-        // Paso 1: Enviar el mensaje del usuario a OpenRouter para obtener una respuesta del bot
-        const openRouterResponse = await axios.post(
-          'https://openrouter.ai/api/v1/chat/completions',
-          {
-            model: 'moonshotai/kimi-k2:free', // Usando el modelo original que tenías
-            messages: [{ role: 'user', content: userMessage }],
-          },
-          {
-            headers: {
-              'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
-              'Content-Type': 'application/json',
-            },
-            timeout: 15000 // Aumenta el tiempo de espera por si OpenRouter tarda un poco
-          }
-        );
+        // --- LÓGICA DE FLUJOS DE CONVERSACIÓN ---
+        switch (currentStatus) {
+            case 'IDLE':
+                if (userMessage === 'quiero pedir' || userMessage === 'pedir') {
+                    botResponse = '¡Claro! ¿Qué producto te gustaría pedir?';
+                    await setUserState(from, 'AWAITING_PRODUCT', {}); // Establecer nuevo estado y resetear datos
+                } else {
+                    // Comportamiento por defecto: enviar a OpenRouter si no está en un flujo
+                    const openRouterResponse = await axios.post(
+                        'https://openrouter.ai/api/v1/chat/completions',
+                        {
+                            model: 'moonshotai/kimi-k2:free',
+                            messages: [{ role: 'user', content: userMessage }],
+                        },
+                        {
+                            headers: {
+                                'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+                                'Content-Type': 'application/json',
+                            },
+                            timeout: 15000
+                        }
+                    );
+                    botResponse = openRouterResponse.data.choices[0].message.content;
+                }
+                break;
 
-        botResponse = openRouterResponse.data.choices[0].message.content;
-        console.log('🤖 Respuesta del bot:', botResponse);
+            case 'AWAITING_PRODUCT':
+                if (userMessage === 'cancelar pedido') {
+                    botResponse = 'Pedido cancelado. ¿Hay algo más en lo que pueda ayudarte?';
+                    await setUserState(from, 'IDLE', {}); // Volver a IDLE
+                } else {
+                    currentData.product = userMessage; // Guardar el producto
+                    botResponse = `¿Cuántas unidades de ${currentData.product} necesitas?`;
+                    await setUserState(from, 'AWAITING_QUANTITY', currentData); // Avanzar al siguiente estado
+                }
+                break;
 
-        // Paso 2: Enviar la respuesta del bot de vuelta al usuario en WhatsApp
+            case 'AWAITING_QUANTITY':
+                const quantity = parseInt(userMessage); // Intentar convertir el mensaje a número
+                if (userMessage === 'cancelar pedido') {
+                    botResponse = 'Pedido cancelado. ¿Hay algo más en lo que pueda ayudarte?';
+                    await setUserState(from, 'IDLE', {}); // Volver a IDLE
+                } else if (!isNaN(quantity) && quantity > 0) { // Validar que sea un número positivo
+                    currentData.quantity = quantity; // Guardar la cantidad
+                    botResponse = `¿Confirmas tu pedido de ${currentData.quantity} unidades de ${currentData.product}? (Sí/No)`;
+                    await setUserState(from, 'AWAITING_CONFIRMATION', currentData); // Avanzar al siguiente estado
+                } else {
+                    botResponse = 'Por favor, ingresa una cantidad válida (un número positivo).';
+                    // Mantenerse en el mismo estado si la entrada es inválida
+                }
+                break;
+
+            case 'AWAITING_CONFIRMATION':
+                if (userMessage === 'sí' || userMessage === 'si') {
+                    botResponse = `¡Pedido de ${currentData.quantity} unidades de ${currentData.product} confirmado! Te avisaremos cuando esté listo.`;
+                    // --- AQUÍ SE INTEGRARÍA CON SAP EN EL FUTURO ---
+                    console.log('🎉 Pedido finalizado y confirmado:', currentData);
+                    await setUserState(from, 'IDLE', {}); // Resetear estado después de completar el pedido
+
+                    // Opcional: Guardar el pedido final en una colección separada 'orders'
+                    await db.collection('orders').add({
+                        phoneNumber: from,
+                        product: currentData.product,
+                        quantity: currentData.quantity,
+                        status: 'CONFIRMED',
+                        orderDate: admin.firestore.FieldValue.serverTimestamp()
+                    });
+                    console.log('💾 Pedido guardado en la colección "orders".');
+
+                } else if (userMessage === 'no' || userMessage === 'cancelar pedido') {
+                    botResponse = 'Pedido cancelado. ¿Hay algo más en lo que pueda ayudarte?';
+                    await setUserState(from, 'IDLE', {}); // Volver a IDLE
+                } else {
+                    botResponse = 'Por favor, responde "Sí" para confirmar o "No" para cancelar el pedido.';
+                    // Mantenerse en el mismo estado si la entrada es inválida
+                }
+                break;
+
+            default:
+                // Si el estado es desconocido o inválido, se resetea a IDLE
+                botResponse = 'Lo siento, hubo un error en el flujo de conversación. Por favor, di "cancelar pedido" para empezar de nuevo.';
+                await setUserState(from, 'IDLE', {});
+                break;
+        }
+
+        // Enviar la respuesta determinada por el bot a WhatsApp
         await axios.post(
-          `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`, // Asegúrate de que la versión de la API sea correcta (v19.0)
-          {
-            messaging_product: 'whatsapp',
-            to: from,
-            type: 'text',
-            text: { body: botResponse },
-          },
-          {
-            headers: {
-              'Authorization': `Bearer ${WHATSAPP_TOKEN}`,
-              'Content-Type': 'application/json',
+            `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`,
+            {
+                messaging_product: 'whatsapp',
+                to: from,
+                type: 'text',
+                text: { body: botResponse },
             },
-          }
+            {
+                headers: {
+                    'Authorization': `Bearer ${WHATSAPP_TOKEN}`,
+                    'Content-Type': 'application/json',
+                },
+            }
         );
         console.log('✅ Mensaje enviado a WhatsApp.');
 
       } catch (error) {
         console.error('❌ ERROR al procesar mensaje o enviar respuesta:', error.response ? JSON.stringify(error.response.data, null, 2) : error.message);
-        // Si hay un error, el botResponse ya tiene el mensaje de error por defecto
+        // Si hay un error en la lógica del flujo o al enviar, enviar un error genérico al usuario
+        try {
+            await axios.post(
+                `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`,
+                {
+                    messaging_product: 'whatsapp',
+                    to: from,
+                    type: 'text',
+                    text: { body: 'Lo siento, hubo un error inesperado. Por favor, intenta de nuevo.' },
+                },
+                {
+                    headers: {
+                        'Authorization': `Bearer ${WHATSAPP_TOKEN}`,
+                        'Content-Type': 'application/json',
+                    },
+                }
+            );
+        } catch (sendError) {
+            console.error('❌ ERROR al enviar mensaje de error al usuario:', sendError.response ? JSON.stringify(sendError.response.data, null, 2) : sendError.message);
+        }
+        // Resetear estado a IDLE en caso de error crítico
+        await setUserState(from, 'IDLE', {});
       }
 
-      // --- GUARDAR LA CONVERSACIÓN EN FIRESTORE ---
+      // --- GUARDAR LA CONVERSACIÓN EN FIRESTORE (lógica existente) ---
+      // Esta parte sigue capturando tanto la entrada del usuario como la respuesta final del bot
       try {
         await db.collection('conversations').add({
           phoneNumber: from,
-          userMessage: userMessage,
-          botResponse: botResponse, // Guarda la respuesta real o el mensaje de error si hubo uno
+          userMessage: userMessage, // Mensaje real del usuario
+          botResponse: botResponse, // Respuesta real del bot (del flujo o de la IA)
           timestamp: timestamp,
           messageId: messageId
         });
@@ -158,7 +278,7 @@ app.post('/webhook', async (req, res) => {
 
     } else {
       console.log(`Mensaje no es de texto. Tipo: ${messageType}`);
-      // Opcional: Notificar al usuario que solo se procesan mensajes de texto
+      // Si el mensaje no es de texto, el bot informa al usuario
       try {
           await axios.post(
             `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`,
