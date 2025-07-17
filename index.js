@@ -13,7 +13,7 @@ if (!admin.apps.length) {
 }
 const db = admin.firestore();
 
-// --- FUNCIONES DE UTILIDAD (SIN CAMBIOS) ---
+// --- FUNCIONES DE UTILIDAD ---
 async function getUserState(phoneNumber) {
     const userStateRef = db.collection('user_states').doc(phoneNumber);
     const doc = await userStateRef.get();
@@ -77,7 +77,7 @@ async function showCartSummary(from, data) {
     await setUserState(from, 'AWAITING_ORDER_ACTION', data);
 }
 
-// --- VARIABLES DE ENTORNO Y RUTAS (SIN CAMBIOS) ---
+// --- VARIABLES DE ENTORNO Y RUTAS ---
 const PORT = process.env.PORT || 3000;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 app.get('/health', (req, res) => res.sendStatus(200));
@@ -110,7 +110,6 @@ app.post('/webhook', async (req, res) => {
       return res.sendStatus(200);
   }
   
-  console.log(`💬 Mensaje de ${from} (${message.type}): ${userMessage}`);
   const currentUserState = await getUserState(from);
   let { status, data = {} } = currentUserState;
 
@@ -140,7 +139,6 @@ app.post('/webhook', async (req, res) => {
                   await showCartSummary(from, data);
                   break;
               }
-
               const foundProducts = await findProductsInCatalog(originalText);
               if (foundProducts.length === 0) {
                   await sendWhatsAppMessage(from, "Lo siento, no encontré productos que coincidan con tu búsqueda.");
@@ -149,47 +147,16 @@ app.post('/webhook', async (req, res) => {
                   await sendWhatsAppMessage(from, `Encontré "${data.pendingProduct.productName}". ¿Qué cantidad necesitas?`);
                   await setUserState(from, 'AWAITING_QUANTITY', data);
               } else {
-                  // --- ESTA ES LA NUEVA LÓGICA CONDICIONAL ---
                   let clarificationMenu;
                   const validProducts = foundProducts.filter(p => p.shortName && p.sku);
-
-                  // Si hay 3 o menos productos con nombre corto, usamos BOTONES
                   if (validProducts.length > 0 && validProducts.length <= 3) {
-                      clarificationMenu = {
-                          type: 'button',
-                          body: { text: `Para "${originalText}", ¿a cuál de estos te refieres?` },
-                          action: {
-                              buttons: validProducts.map(p => ({
-                                  type: 'reply',
-                                  reply: { id: p.sku, title: p.shortName }
-                              }))
-                          }
-                      };
-                  } 
-                  // Si hay más de 3 productos, usamos una LISTA
-                  else if (validProducts.length > 3) {
-                      clarificationMenu = {
-                          type: 'list',
-                          header: { type: 'text', text: 'Múltiples coincidencias' },
-                          body: { text: `Para "${originalText}", ¿a cuál de estos te refieres?` },
-                          action: {
-                              button: 'Ver opciones',
-                              sections: [{
-                                  title: 'Elige una presentación',
-                                  rows: validProducts.slice(0, 10).map(p => ({ // La lista muestra hasta 10 opciones
-                                      id: p.sku,
-                                      title: p.shortName,
-                                      description: p.productName
-                                  }))
-                              }]
-                          }
-                      };
+                      clarificationMenu = { type: 'button', body: { text: `Para "${originalText}", ¿a cuál de estos te refieres?` }, action: { buttons: validProducts.map(p => ({ type: 'reply', reply: { id: p.sku, title: p.shortName } })) } };
+                  } else if (validProducts.length > 3) {
+                      clarificationMenu = { type: 'list', header: { type: 'text', text: 'Múltiples coincidencias' }, body: { text: `Para "${originalText}", ¿a cuál de estos te refieres?` }, action: { button: 'Ver opciones', sections: [{ title: 'Elige una presentación', rows: validProducts.slice(0, 10).map(p => ({ id: p.sku, title: p.shortName, description: p.productName })) }] } };
                   } else {
-                      // Si no hay productos válidos (sin shortName, etc.), avisamos
                       await sendWhatsAppMessage(from, "Lo siento, encontré coincidencias pero no pude generar las opciones.");
                       break;
                   }
-                  
                   await sendWhatsAppMessage(from, '', 'interactive', clarificationMenu);
                   await setUserState(from, 'AWAITING_CLARIFICATION', data);
               }
@@ -211,9 +178,11 @@ app.post('/webhook', async (req, res) => {
                   break;
               }
               data.pendingQuantity = quantity;
-
               const product = data.pendingProduct;
-              if (product && product.availableUnits && product.availableUnits.length > 0) {
+
+              // --- ¡AQUÍ ESTÁ LA NUEVA LÓGICA! ---
+              // Si hay MÁS DE 1 unidad de medida, preguntamos.
+              if (product && product.availableUnits && product.availableUnits.length > 1) {
                   const unitMenu = {
                       type: 'button',
                       body: { text: `Entendido, ${quantity}. ¿En qué unidad?` },
@@ -227,7 +196,9 @@ app.post('/webhook', async (req, res) => {
                   await sendWhatsAppMessage(from, '', 'interactive', unitMenu);
                   await setUserState(from, 'AWAITING_UOM', data);
               } else {
-                  const newOrderItem = { ...data.pendingProduct, quantity: data.pendingQuantity, unit: 'unidad' };
+                  // Si hay 1 o 0 unidades, la seleccionamos automáticamente y vamos al carrito.
+                  const unit = (product.availableUnits && product.availableUnits.length === 1) ? product.availableUnits[0] : 'unidad';
+                  const newOrderItem = { ...data.pendingProduct, quantity: data.pendingQuantity, unit: unit };
                   if (!data.orderItems) data.orderItems = [];
                   data.orderItems.push(newOrderItem);
                   delete data.pendingProduct;
@@ -260,18 +231,18 @@ app.post('/webhook', async (req, res) => {
           case 'AWAITING_FINAL_CONFIRMATION':
               if (userMessage.toLowerCase().trim() === 'sí' || userMessage.toLowerCase().trim() === 'si') {
                   const orderNumber = `PEDIDO-${Date.now()}`;
-                  const finalMessage = `¡Pedido confirmado! ✅\n\nTu número de orden es: *${orderNumber}*\n\nGracias por tu compra.`;
+                  const finalMessage = `¡Pedido confirmado! ✅\n\nTu número de orden es: *${orderNumber}*`;
                   await db.collection('orders').add({ orderNumber, phoneNumber: from, status: 'CONFIRMED', orderDate: admin.firestore.FieldValue.serverTimestamp(), items: data.orderItems });
                   await sendWhatsAppMessage(from, finalMessage);
                   await setUserState(from, 'IDLE', {});
               } else {
-                  await sendWhatsAppMessage(from, "Pedido cancelado. Puedes iniciar de nuevo cuando quieras.");
+                  await sendWhatsAppMessage(from, "Pedido cancelado. Puedes iniciar de nuevo.");
                   await setUserState(from, 'IDLE', {});
               }
               break;
 
           default:
-              await sendWhatsAppMessage(from, 'Lo siento, hubo un error. Por favor, empieza de nuevo.');
+              await sendWhatsAppMessage(from, 'Lo siento, hubo un error. Empieza de nuevo.');
               await setUserState(from, 'IDLE', {});
               break;
       }
