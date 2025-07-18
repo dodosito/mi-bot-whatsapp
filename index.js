@@ -73,7 +73,7 @@ async function extractOrderDetailsWithAI(userText, candidateProducts) {
         const response = await axios.post(
             'https://openrouter.ai/api/v1/chat/completions',
             {
-                model: 'openai/gpt-4o',
+                model: 'mistralai/mistral-7b-instruct:free', // <-- ¡AQUÍ ESTÁ EL CAMBIO!
                 messages: [{ role: 'system', content: prompt }]
             },
             { headers: { 'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}` } }
@@ -163,8 +163,6 @@ app.post('/webhook', async (req, res) => {
       userMessage = message.interactive[message.interactive.type].id;
   } else { return res.sendStatus(200); }
   
-  console.log(`💬 Mensaje de ${from} (${message.type}): ${userMessage}`);
-
   try {
       const currentUserState = await getUserState(from);
       let { status, data = {} } = currentUserState;
