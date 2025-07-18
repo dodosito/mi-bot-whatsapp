@@ -104,16 +104,15 @@ async function findProductsInCatalog(text) {
 
 async function splitTextIntoItemsAI(userText) {
     console.log("🤖 Usando IA para dividir la lista de productos...");
-    // --- MEJORA 1: Prompt de la IA más estricto ---
     const prompt = `
       Tu única tarea es analizar el texto de un cliente y separarlo en una lista de productos individuales.
-      Corrige errores de tipeo obvios. No añadas palabras que no estén en el texto original, como cantidades ('un', 'una').
+      Corrige errores de tipeo obvios.
       Texto del Cliente: "${userText}"
       Responde únicamente con un array de strings en formato JSON. No incluyas nada más en tu respuesta.
       Ejemplo:
       Texto del Cliente: "quiero 20 cajas de pilsen 630ml y 10 paquetes de coca-cola, tambien una servesa cristall"
       Tu Respuesta:
-      ["20 cajas de pilsen 630ml", "10 paquetes de coca-cola", "cerveza cristal"]
+      ["20 cajas de pilsen 630ml", "10 paquetes de coca-cola", "una cerveza cristal"]
     `;
     try {
         const response = await axios.post('https://openrouter.ai/api/v1/chat/completions', {
@@ -150,16 +149,16 @@ async function processNextItemInQueue(from, data) {
         await sendWhatsAppMessage(from, `No encontré productos para "${nextItemText}". Saltando al siguiente ítem.`);
         await processNextItemInQueue(from, data);
     } else if (candidateProducts.length > 1) {
-        // --- MEJORA 2: Texto de desambiguación corregido ---
-        if (data.initialItemCount > 0) {
-            const initialMessage = `Identifiqué ${data.initialItemCount} productos. ¡Vamos a completarlos!`;
+        // --- MEJORA 2: Texto de desambiguación más conversacional ---
+        if (data.initialItemCount) {
+            const initialMessage = `Identifiqué ${data.initialItemCount} productos. ¡Vamos a completarlos!\n\nPara: "${nextItemText}"`;
             await sendWhatsAppMessage(from, initialMessage);
-            data.initialItemCount = 0; // Lo ponemos en 0 para que no se repita
+            delete data.initialItemCount; // Para que no se repita
         }
 
         let clarificationMenu;
         const validProducts = candidateProducts.filter(p => p.shortName && p.sku);
-        const menuBody = `Para "${nextItemText}", ¿a cuál de estos te refieres?`;
+        const menuBody = data.initialItemCount ? `Primero, ¿a cuál de estos te refieres?` : `Para "${nextItemText}", ¿a cuál de estos te refieres?`;
         if (validProducts.length > 0 && validProducts.length <= 3) {
             clarificationMenu = { type: 'button', body: { text: menuBody }, action: { buttons: validProducts.map(p => ({ type: 'reply', reply: { id: p.sku, title: p.shortName } })) } };
         } else {
@@ -271,7 +270,7 @@ app.post('/webhook', async (req, res) => {
                     const mainMenu = { type: "button", body: { text: `¡Hola! Soy tu asistente virtual.` }, action: { buttons: [{ type: "reply", reply: { id: "start_order", title: "🛒 Realizar Pedido" } }, { type: "reply", reply: { id: "contact_agent", title: "🗣️ Hablar con asesor" } }] } };
                     await sendWhatsAppMessage(from, '', 'interactive', mainMenu);
                     botResponseLog = "Menú principal enviado.";
-                    await setUserState(from, 'AWAIT-MAIN_MENU_CHOICE', {});
+                    await setUserState(from, 'AWAITING_MAIN_MENU_CHOICE', {});
                 }
                 break;
 
@@ -279,7 +278,7 @@ app.post('/webhook', async (req, res) => {
                 const items = await splitTextIntoItemsAI(originalText);
                 if (items && items.length > 0) {
                     data.itemsQueue = items;
-                    data.initialItemCount = items.length;
+                    data.initialItemCount = items.length; // Guardamos el número inicial de ítems
                     await processNextItemInQueue(from, data);
                 } else {
                     await sendWhatsAppMessage(from, "No pude identificar productos en tu pedido. Por favor, intenta de nuevo.");
