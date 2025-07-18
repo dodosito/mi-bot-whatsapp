@@ -107,9 +107,9 @@ async function splitTextIntoItemsAI(userText) {
     console.log("🤖 Usando IA para dividir la lista de productos...");
     const prompt = `
       Tu única tarea es analizar el texto de un cliente y separarlo en una lista de productos individuales.
-      Corrige errores de tipeo obvios.
+      Corrige errores de tipeo obvios en los nombres de los productos.
       Texto del Cliente: "${userText}"
-      Responde únicamente con un array de strings en formato JSON.
+      Responde únicamente con un array de strings en formato JSON. No incluyas nada más en tu respuesta.
       Ejemplo:
       Texto del Cliente: "quiero 20 cajas de pilsen 630ml y 10 paquetes de coca-cola, tambien una servesa cristall"
       Tu Respuesta:
@@ -121,30 +121,17 @@ async function splitTextIntoItemsAI(userText) {
             messages: [{ role: 'system', content: prompt }]
         }, { headers: { 'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}` } });
         let content = response.data.choices[0].message.content;
+        console.log("🧠 Respuesta cruda de la IA (splitter):", content);
         const jsonMatch = content.match(/\[[\s\S]*\]/);
-        if (!jsonMatch) return [];
+        if (!jsonMatch) {
+            console.error("❌ La IA (splitter) no devolvió un JSON array válido.");
+            return [userText]; // Si falla, procesamos el texto original como un solo ítem
+        }
         return JSON.parse(jsonMatch[0]);
     } catch (error) {
         console.error("❌ Error en la división con IA:", error.message);
-        return [];
+        return [userText]; // Si hay error, procesamos el texto original como un solo ítem
     }
-}
-
-// --- NUEVA FUNCIÓN PARA PROCESAR LA COLA DE PEDIDOS ---
-async function processNextItemInQueue(from, data) {
-    console.log("🔄 Procesando siguiente ítem en la cola...");
-    if (!data.itemsQueue || data.itemsQueue.length === 0) {
-        console.log("✅ Cola de ítems vacía. Mostrando resumen final.");
-        await showCartSummary(from, data);
-        return;
-    }
-
-    const nextItemText = data.itemsQueue.shift(); // Sacamos el primer ítem
-    data.currentItemText = nextItemText; // Lo guardamos por si hay ambigüedad
-    await setUserState(from, 'PROCESSING_ITEM', data);
-    
-    // Disparamos el procesamiento del ítem actual
-    await handleIncomingMessage(from, { status: 'PROCESSING_ITEM', data }, nextItemText);
 }
 
 async function showCartSummary(from, data) {
@@ -178,27 +165,6 @@ app.get('/webhook', (req, res) => {
   }
 });
 
-// --- FUNCIÓN CENTRAL REFACTORIZADA PARA MANEJAR LÓGICA ---
-async function handleIncomingMessage(from, currentUserState, originalText) {
-    let { status, data = {} } = currentUserState;
-    let userMessage = originalText;
-    let botResponseLog = '';
-
-    switch (status) {
-        // ... (el resto de los casos van aquí)
-    }
-
-    await db.collection('conversations').add({
-        phoneNumber: from,
-        userMessage: originalText || userMessage,
-        botResponse: botResponseLog || 'Resumen/menú enviado.',
-        status: status,
-        timestamp: admin.firestore.FieldValue.serverTimestamp()
-    });
-    console.log("💾 Conversación guardada en Firestore.");
-}
-
-
 // --- RUTA PRINCIPAL PARA RECIBIR MENSAJES ---
 app.post('/webhook', async (req, res) => {
   if (!req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0]) {
@@ -207,12 +173,12 @@ app.post('/webhook', async (req, res) => {
   
   const message = req.body.entry[0].changes[0].value.messages[0];
   const from = message.from;
-  let userMessage, originalText = '';
+  let userMessage, originalText = '', botResponseLog = '';
 
   if (message.type === 'text') {
       userMessage = originalText = message.text.body;
   } else if (message.interactive) {
-      userMessage = originalText = message.interactive[message.interactive.type].id;
+      userMessage = originalText = message.interactive[message.interactive.type].id; // Usamos originalText para botones también
   } else { return res.sendStatus(200); }
   
   try {
@@ -222,12 +188,208 @@ app.post('/webhook', async (req, res) => {
       if (userMessage.toLowerCase().trim() === 'resetear') {
           await setUserState(from, 'IDLE', {});
           await sendWhatsAppMessage(from, 'Estado reseteado. ✅');
-          return res.sendStatus(200);
+          botResponseLog = 'Estado reseteado.';
+      } else {
+        // --- NUEVO PROCESADOR DE COLA DE TAREAS ---
+        if (data.itemsQueue && data.itemsQueue.length > 0) {
+            // Si hay ítems en la cola, los procesamos antes que cualquier otra cosa
+            const nextItemText = data.itemsQueue.shift();
+            console.log(`[COLA]: Procesando siguiente ítem: "${nextItemText}"`);
+            // Volvemos a llamar a la lógica de AWAITING_ORDER_TEXT pero con el nuevo texto
+            status = 'AWAITING_ORDER_TEXT'; 
+            originalText = nextItemText;
+        }
+
+        switch (status) {
+            case 'IDLE':
+            case 'AWAITING_MAIN_MENU_CHOICE':
+                if (userMessage === 'start_order') {
+                    botResponseLog = "Por favor, ingresa tu pedido. Puedes incluir varios productos.\n\n*(Por ej: 5 cajas de cerveza pilsen y 3 gaseosas)*";
+                    await sendWhatsAppMessage(from, botResponseLog);
+                    await setUserState(from, 'AWAITING_ORDER_TEXT', { orderItems: [] });
+                } else {
+                    const mainMenu = { type: "button", body: { text: `¡Hola! Soy tu asistente virtual.` }, action: { buttons: [{ type: "reply", reply: { id: "start_order", title: "🛒 Realizar Pedido" } }, { type: "reply", reply: { id: "contact_agent", title: "🗣️ Hablar con asesor" } }] } };
+                    await sendWhatsAppMessage(from, '', 'interactive', mainMenu);
+                    botResponseLog = "Menú principal enviado.";
+                    await setUserState(from, 'AWAITING_MAIN_MENU_CHOICE', {});
+                }
+                break;
+
+            case 'AWAITING_ORDER_TEXT':
+                if (userMessage === 'back_to_cart') {
+                    await showCartSummary(from, data);
+                    break;
+                }
+                
+                // 1. Usamos la IA para dividir el texto en una lista de ítems
+                const items = await splitTextIntoItemsAI(originalText);
+                console.log("[COLA]: IA dividió el texto en:", items);
+
+                if (items.length > 0) {
+                    const firstItem = items.shift(); // Sacamos el primer ítem para procesarlo ahora
+                    data.itemsQueue = items; // Guardamos el resto en la cola
+                    
+                    // 2. Procesamos el primer ítem con la lógica que ya teníamos
+                    const candidateProducts = await findProductsInCatalog(firstItem);
+                    if (candidateProducts.length === 0) {
+                        await sendWhatsAppMessage(from, `No encontré productos para "${firstItem}".`);
+                        await processNextItemInQueue(from, data); // Intentamos con el siguiente
+                    } else if (candidateProducts.length > 1) {
+                        let clarificationMenu;
+                        const validProducts = candidateProducts.filter(p => p.shortName && p.sku);
+                        if (validProducts.length > 0 && validProducts.length <= 3) {
+                            clarificationMenu = { type: 'button', body: { text: `Para "${firstItem}", ¿a cuál de estos te refieres?` }, action: { buttons: validProducts.map(p => ({ type: 'reply', reply: { id: p.sku, title: p.shortName } })) } };
+                        } else if (validProducts.length > 3) {
+                            clarificationMenu = { type: 'list', body: { text: `Para "${firstItem}", ¿a cuál de estos te refieres?` }, action: { button: 'Ver opciones', sections: [{ title: 'Elige una presentación', rows: validProducts.slice(0, 10).map(p => ({ id: p.sku, title: p.shortName, description: p.productName })) }] } };
+                        }
+                        data.originalTextForClarification = firstItem;
+                        await sendWhatsAppMessage(from, '', 'interactive', clarificationMenu);
+                        await setUserState(from, 'AWAITING_CLARIFICATION', data);
+                    } else if (candidateProducts.length === 1) {
+                        const product = candidateProducts[0];
+                        const text = firstItem.toLowerCase();
+                        const quantityMatch = text.match(/(\d+)(?!ml)/);
+                        const quantity = quantityMatch ? parseInt(quantityMatch[0]) : null;
+                        let unit = null;
+                        if (product.availableUnits) {
+                            for (const u of product.availableUnits) {
+                                const unitRegex = new RegExp(`\\b${u.toLowerCase()}s?\\b`);
+                                if (text.match(unitRegex)) { unit = u; break; }
+                            }
+                        }
+                        if (quantity && unit) {
+                            const newOrderItem = { ...product, quantity, unit };
+                            if (!data.orderItems) data.orderItems = [];
+                            data.orderItems.push(newOrderItem);
+                            console.log(`[COLA]: Ítem "${product.productName}" añadido. Verificando cola...`);
+                            await processNextItemInQueue(from, data);
+                        } else {
+                            data.pendingProduct = product;
+                            await sendWhatsAppMessage(from, `Encontré "${product.productName}". ¿Qué cantidad necesitas?`);
+                            await setUserState(from, 'AWAITING_QUANTITY', data);
+                        }
+                    }
+                } else {
+                    await sendWhatsAppMessage(from, "Lo siento, no pude identificar ningún producto en tu pedido.");
+                }
+                break;
+            
+            case 'AWAITING_CLARIFICATION':
+                // ... (la lógica es la misma, pero al final procesa el siguiente ítem)
+                const productDoc = await db.collection('products').doc(userMessage).get();
+                if (productDoc.exists) {
+                    const product = productDoc.data();
+                    const text = data.originalTextForClarification.toLowerCase();
+                    const quantityMatch = text.match(/(\d+)(?!ml)/);
+                    const quantity = quantityMatch ? parseInt(quantityMatch[0]) : null;
+                    let unit = null;
+                    if (product.availableUnits) {
+                        for (const u of product.availableUnits) {
+                            const unitRegex = new RegExp(`\\b${u.toLowerCase()}s?\\b`);
+                            if (text.match(unitRegex)) { unit = u; break; }
+                        }
+                    }
+                    delete data.originalTextForClarification;
+                    if (quantity && unit) {
+                        const newOrderItem = { ...product, quantity, unit };
+                        if (!data.orderItems) data.orderItems = [];
+                        data.orderItems.push(newOrderItem);
+                        await processNextItemInQueue(from, data);
+                    } else {
+                        data.pendingProduct = product;
+                        await sendWhatsAppMessage(from, `Seleccionaste "${product.productName}". ¿Qué cantidad necesitas?`);
+                        await setUserState(from, 'AWAITING_QUANTITY', data);
+                    }
+                }
+                break;
+
+            case 'AWAITING_QUANTITY':
+                // ... (la lógica es la misma, pero al final procesa el siguiente ítem)
+                const product = data.pendingProduct;
+                const text = normalizeText(originalText);
+                const quantityMatch = text.match(/(\d+)(?!ml)/);
+                const quantity = quantityMatch ? parseInt(quantityMatch[0]) : null;
+                if (!quantity) {
+                    await sendWhatsAppMessage(from, "Por favor, ingresa una cantidad numérica válida.");
+                    break;
+                }
+                let unit = null;
+                if (product.availableUnits) {
+                    let bestUnitMatch = { unit: null, distance: 3 };
+                    const wordsInText = text.split(' ');
+                    wordsInText.forEach(word => {
+                        product.availableUnits.forEach(availUnit => {
+                            const distance = levenshteinDistance(word, normalizeText(availUnit));
+                            if (distance < bestUnitMatch.distance && distance <= 2) {
+                                bestUnitMatch = { unit: availUnit, distance: distance };
+                            }
+                        });
+                    });
+                    if (bestUnitMatch.distance <= 2) {
+                        unit = bestUnitMatch.unit;
+                    }
+                }
+                if (unit) {
+                    const newOrderItem = { ...product, quantity, unit };
+                    if (!data.orderItems) data.orderItems = [];
+                    data.orderItems.push(newOrderItem);
+                    delete data.pendingProduct;
+                    await processNextItemInQueue(from, data);
+                } else if (product.availableUnits && product.availableUnits.length > 1) {
+                    data.pendingQuantity = quantity;
+                    const unitMenu = { type: 'button', body: { text: `Entendido, ${quantity}. ¿En qué unidad?` }, action: { buttons: product.availableUnits.slice(0, 3).map(u => ({ type: 'reply', reply: { id: u.toLowerCase(), title: u } })) } };
+                    await sendWhatsAppMessage(from, '', 'interactive', unitMenu);
+                    await setUserState(from, 'AWAITING_UOM', data);
+                } else {
+                    const singleUnit = (product.availableUnits && product.availableUnits.length === 1) ? product.availableUnits[0] : 'unidad';
+                    const newOrderItem = { ...product, quantity, unit: singleUnit };
+                    if (!data.orderItems) data.orderItems = [];
+                    data.orderItems.push(newOrderItem);
+                    delete data.pendingProduct;
+                    await processNextItemInQueue(from, data);
+                }
+                break;
+
+            case 'AWAITING_UOM':
+                // ... (la lógica es la misma, pero al final procesa el siguiente ítem)
+                const selectedUnit = userMessage;
+                const newOrderItem = { ...data.pendingProduct, quantity: data.pendingQuantity, unit: selectedUnit };
+                if (!data.orderItems) data.orderItems = [];
+                data.orderItems.push(newOrderItem);
+                delete data.pendingProduct;
+                delete data.pendingQuantity;
+                await processNextItemInQueue(from, data);
+                break;
+
+            case 'AWAITING_ORDER_ACTION':
+                if (userMessage === 'add_more_products') {
+                    const askMoreMenu = { type: 'button', body: { text: "Claro, ¿qué más deseas añadir?" }, action: { buttons: [{ type: 'reply', reply: { id: 'back_to_cart', title: '↩️ Ver mi pedido' } }] } };
+                    await sendWhatsAppMessage(from, '', 'interactive', askMoreMenu);
+                    await setUserState(from, 'AWAITING_ORDER_TEXT', data);
+                } else if (userMessage === 'finish_order') {
+                    const orderNumber = `PEDIDO-${Date.now()}`;
+                    botResponseLog = `¡Pedido confirmado! ✅\n\nTu número de orden es: *${orderNumber}*`;
+                    await db.collection('orders').add({ orderNumber, phoneNumber: from, status: 'CONFIRMED', orderDate: admin.firestore.FieldValue.serverTimestamp(), items: data.orderItems });
+                    await sendWhatsAppMessage(from, botResponseLog);
+                    await setUserState(from, 'IDLE', {});
+                }
+                break;
+
+            default:
+                await sendWhatsAppMessage(from, 'Lo siento, hubo un error. Empieza de nuevo.');
+                await setUserState(from, 'IDLE', {});
+                break;
+        }
       }
-      
-      // La lógica principal ahora está dentro de la función handleIncomingMessage
-      // Esto nos permite llamarla de forma recursiva para procesar la cola
-      await handleIncomingMessage(from, { status, data }, originalText);
+
+      await db.collection('conversations').add({
+          phoneNumber: from,
+          userMessage: originalText || userMessage,
+          botResponse: botResponseLog || 'Resumen de carrito/menú enviado.',
+          status: status,
+          timestamp: admin.firestore.FieldValue.serverTimestamp()
+      });
+      console.log("💾 Conversación guardada en Firestore.");
 
   } catch (error) {
       console.error('❌ ERROR en la lógica del bot:', error);
@@ -237,50 +399,21 @@ app.post('/webhook', async (req, res) => {
   res.sendStatus(200);
 });
 
-// Refactorización de la lógica principal a una función separada
-async function mainLogic(from, status, data, originalText, userMessage) {
-    let botResponseLog = '';
-    switch (status) {
-        case 'IDLE':
-        case 'AWAITING_MAIN_MENU_CHOICE':
-            if (userMessage === 'start_order') {
-                botResponseLog = "Por favor, ingresa tu pedido. Puedes incluir varios productos.\n\n*(Por ej: 5 cajas de cerveza pilsen y 3 gaseosas)*";
-                await sendWhatsAppMessage(from, botResponseLog);
-                await setUserState(from, 'AWAITING_ORDER_TEXT', { orderItems: [] });
-            } else {
-                const mainMenu = { type: "button", body: { text: `¡Hola! Soy tu asistente virtual.` }, action: { buttons: [{ type: "reply", reply: { id: "start_order", title: "🛒 Realizar Pedido" } }, { type: "reply", reply: { id: "contact_agent", title: "🗣️ Hablar con asesor" } }] } };
-                await sendWhatsAppMessage(from, '', 'interactive', mainMenu);
-                botResponseLog = "Menú principal enviado.";
-                await setUserState(from, 'AWAITING_MAIN_MENU_CHOICE', {});
-            }
-            break;
-
-        case 'AWAITING_ORDER_TEXT':
-            const items = await splitTextIntoItemsAI(originalText);
-            if (items.length > 0) {
-                data.itemsQueue = items;
-                await processNextItemInQueue(from, data);
-            } else {
-                await sendWhatsAppMessage(from, "No pude identificar productos en tu pedido. Por favor, intenta de nuevo.");
-            }
-            break;
-        
-        case 'PROCESSING_ITEM':
-            const candidateProducts = await findProductsInCatalog(originalText);
-            if (candidateProducts.length === 0) {
-                await sendWhatsAppMessage(from, `No encontré productos para "${originalText}". Saltando al siguiente ítem.`);
-                await processNextItemInQueue(from, data);
-            } else if (candidateProducts.length > 1) {
-                // ... (lógica de desambiguación) ...
-            } else if (candidateProducts.length === 1) {
-                // ... (lógica de extracción y/o preguntas) ...
-            }
-            break;
-
-        // ... otros casos como AWAITING_CLARIFICATION, AWAITING_QUANTITY, etc.
+// Reemplazamos la lógica de handleIncomingMessage con una nueva versión que maneja la cola
+const original_handleIncomingMessage = mainLogic; // Guardamos una referencia
+mainLogic = async function(from, currentUserState, originalText) {
+    // Esta función ahora actúa como un controlador para la cola
+    let { status, data = {} } = currentUserState;
+    if (status === 'AWAITING_ORDER_TEXT' || (data.itemsQueue && data.itemsQueue.length > 0)) {
+        if (status !== 'AWAITING_ORDER_TEXT') {
+            await processNextItemInQueue(from, data);
+        } else {
+             await original_handleIncomingMessage(from, currentUserState, originalText);
+        }
+    } else {
+        await original_handleIncomingMessage(from, currentUserState, originalText);
     }
-}
-
+};
 
 app.listen(PORT, () => {
     console.log(`Servidor escuchando en el puerto ${PORT}`);
