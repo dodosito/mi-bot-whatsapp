@@ -268,25 +268,35 @@ app.post('/webhook', async (req, res) => {
                 break;
 
             case 'AWAITING_QUANTITY':
-                const text = originalText.toLowerCase();
+                const product = data.pendingProduct;
+                const text = normalizeText(originalText);
+
                 const quantityMatch = text.match(/(\d+)(?!ml)/);
                 const quantity = quantityMatch ? parseInt(quantityMatch[0]) : null;
+
                 if (!quantity) {
                     botResponseLog = "Por favor, ingresa una cantidad numérica válida.";
                     await sendWhatsAppMessage(from, botResponseLog);
                     break;
                 }
-                const product = data.pendingProduct;
+
                 let unit = null;
                 if (product.availableUnits) {
-                    for (const u of product.availableUnits) {
-                        const unitRegex = new RegExp(`\\b${u.toLowerCase()}s?\\b`);
-                        if (text.match(unitRegex)) {
-                            unit = u;
-                            break;
-                        }
+                    let bestUnitMatch = { unit: null, distance: 3 }; // Umbral de distancia de 2
+                    const wordsInText = text.split(' ');
+                    wordsInText.forEach(word => {
+                        product.availableUnits.forEach(availUnit => {
+                            const distance = levenshteinDistance(word, normalizeText(availUnit));
+                            if (distance < bestUnitMatch.distance) {
+                                bestUnitMatch = { unit: availUnit, distance: distance };
+                            }
+                        });
+                    });
+                    if (bestUnitMatch.unit) {
+                        unit = bestUnitMatch.unit;
                     }
                 }
+
                 if (unit) {
                     const newOrderItem = { ...product, quantity, unit };
                     if (!data.orderItems) data.orderItems = [];
