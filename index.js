@@ -151,21 +151,16 @@ app.post('/webhook', async (req, res) => {
                         clarificationMenu = { type: 'button', body: { text: `Para "${originalText}", ¿a cuál de estos te refieres?` }, action: { buttons: validProducts.map(p => ({ type: 'reply', reply: { id: p.sku, title: p.shortName } })) } };
                     } else if (validProducts.length > 3) {
                         clarificationMenu = { type: 'list', body: { text: `Para "${originalText}", ¿a cuál de estos te refieres?` }, action: { button: 'Ver opciones', sections: [{ title: 'Elige una presentación', rows: validProducts.slice(0, 10).map(p => ({ id: p.sku, title: p.shortName, description: p.productName })) }] } };
-                    } else {
-                       await sendWhatsAppMessage(from, "Lo siento, encontré coincidencias pero no pude generar las opciones.");
-                       break;
                     }
+                    // --- ¡CAMBIO IMPORTANTE! Guardamos el texto original para recordarlo. ---
+                    data.originalTextForClarification = originalText;
                     await sendWhatsAppMessage(from, '', 'interactive', clarificationMenu);
                     await setUserState(from, 'AWAITING_CLARIFICATION', data);
                 } else if (candidateProducts.length === 1) {
-                    console.log("DEBUG: Se encontró 1 producto candidato. Intentando extracción con reglas.");
                     const product = candidateProducts[0];
                     const text = originalText.toLowerCase();
-
                     const quantityMatch = text.match(/(\d+)(?!ml)/);
                     const quantity = quantityMatch ? parseInt(quantityMatch[0]) : null;
-                    console.log(`DEBUG: Cantidad extraída: ${quantity}`);
-
                     let unit = null;
                     if (product.availableUnits) {
                         for (const u of product.availableUnits) {
@@ -176,16 +171,12 @@ app.post('/webhook', async (req, res) => {
                             }
                         }
                     }
-                    console.log(`DEBUG: Unidad extraída: ${unit}`);
-
                     if (quantity && unit) {
-                        console.log("DEBUG: ¡Éxito! Se encontraron cantidad y unidad. Añadiendo al carrito.");
                         const newOrderItem = { ...product, quantity, unit };
                         if (!data.orderItems) data.orderItems = [];
                         data.orderItems.push(newOrderItem);
                         await showCartSummary(from, data);
                     } else {
-                        console.log("DEBUG: Faltan datos. Pasando al flujo de preguntas manual.");
                         data.pendingProduct = product;
                         await sendWhatsAppMessage(from, `Encontré "${product.productName}". ¿Qué cantidad necesitas?`);
                         await setUserState(from, 'AWAITING_QUANTITY', data);
@@ -193,31 +184,55 @@ app.post('/webhook', async (req, res) => {
                 }
                 break;
             
+            // --- ¡ESTE CASO AHORA ES MÁS INTELIGENTE! ---
             case 'AWAITING_CLARIFICATION':
                 const productDoc = await db.collection('products').doc(userMessage).get();
                 if (productDoc.exists) {
-                    data.pendingProduct = productDoc.data();
-                    botResponseLog = `Seleccionaste "${data.pendingProduct.productName}". ¿Qué cantidad necesitas?`;
-                    await sendWhatsAppMessage(from, botResponseLog);
-                    await setUserState(from, 'AWAITING_QUANTITY', data);
+                    const product = productDoc.data();
+                    const text = data.originalTextForClarification.toLowerCase(); // Usamos el texto guardado
+                    
+                    const quantityMatch = text.match(/(\d+)(?!ml)/);
+                    const quantity = quantityMatch ? parseInt(quantityMatch[0]) : null;
+                    let unit = null;
+                    if (product.availableUnits) {
+                        for (const u of product.availableUnits) {
+                            const unitRegex = new RegExp(`\\b${u.toLowerCase()}s?\\b`);
+                            if (text.match(unitRegex)) {
+                                unit = u;
+                                break;
+                            }
+                        }
+                    }
+
+                    delete data.originalTextForClarification; // Limpiamos el texto guardado
+
+                    if (quantity && unit) {
+                        const newOrderItem = { ...product, quantity, unit };
+                        if (!data.orderItems) data.orderItems = [];
+                        data.orderItems.push(newOrderItem);
+                        await showCartSummary(from, data);
+                    } else {
+                        data.pendingProduct = product;
+                        await sendWhatsAppMessage(from, `Seleccionaste "${product.productName}". ¿Qué cantidad necesitas?`);
+                        await setUserState(from, 'AWAITING_QUANTITY', data);
+                    }
                 }
                 break;
 
             case 'AWAITING_QUANTITY':
                 const quantity = parseInt(userMessage);
                 if (isNaN(quantity) || quantity <= 0) {
-                    botResponseLog = "Por favor, ingresa una cantidad numérica válida.";
-                    await sendWhatsAppMessage(from, botResponseLog);
+                    await sendWhatsAppMessage(from, "Por favor, ingresa una cantidad numérica válida.");
                     break;
                 }
                 data.pendingQuantity = quantity;
-                const product = data.pendingProduct;
-                if (product && product.availableUnits && product.availableUnits.length > 1) {
-                    const unitMenu = { type: 'button', body: { text: `Entendido, ${quantity}. ¿En qué unidad?` }, action: { buttons: product.availableUnits.slice(0, 3).map(unit => ({ type: 'reply', reply: { id: unit.toLowerCase(), title: unit } })) } };
+                const productQty = data.pendingProduct;
+                if (productQty && productQty.availableUnits && productQty.availableUnits.length > 1) {
+                    const unitMenu = { type: 'button', body: { text: `Entendido, ${quantity}. ¿En qué unidad?` }, action: { buttons: productQty.availableUnits.slice(0, 3).map(unit => ({ type: 'reply', reply: { id: unit.toLowerCase(), title: unit } })) } };
                     await sendWhatsAppMessage(from, '', 'interactive', unitMenu);
                     await setUserState(from, 'AWAITING_UOM', data);
                 } else {
-                    const unit = (product.availableUnits && product.availableUnits.length === 1) ? product.availableUnits[0] : 'unidad';
+                    const unit = (productQty.availableUnits && productQty.availableUnits.length === 1) ? productQty.availableUnits[0] : 'unidad';
                     const newOrderItem = { ...data.pendingProduct, quantity: data.pendingQuantity, unit: unit };
                     if (!data.orderItems) data.orderItems = [];
                     data.orderItems.push(newOrderItem);
