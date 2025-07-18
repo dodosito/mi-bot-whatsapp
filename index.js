@@ -104,7 +104,7 @@ app.post('/webhook', async (req, res) => {
   
   const message = req.body.entry[0].changes[0].value.messages[0];
   const from = message.from;
-  let userMessage, originalText = '';
+  let userMessage, originalText = '', botResponseLog = '';
 
   if (message.type === 'text') {
       userMessage = originalText = message.text.body;
@@ -126,8 +126,8 @@ app.post('/webhook', async (req, res) => {
           case 'IDLE':
           case 'AWAITING_MAIN_MENU_CHOICE':
               if (userMessage === 'start_order') {
-                  const instructions = "Por favor, ingresa tu pedido. Puedes incluir varios productos.\n\n*(Por ej: 5 cajas de cerveza pilsen y 3 gaseosas)*";
-                  await sendWhatsAppMessage(from, instructions);
+                  botResponseLog = "Por favor, ingresa tu pedido. Puedes incluir varios productos.\n\n*(Por ej: 5 cajas de cerveza pilsen y 3 gaseosas)*";
+                  await sendWhatsAppMessage(from, botResponseLog);
                   await setUserState(from, 'AWAITING_ORDER_TEXT', { orderItems: [] });
               } else {
                   const mainMenu = { type: "button", body: { text: `¡Hola! Soy tu asistente virtual.` }, action: { buttons: [{ type: "reply", reply: { id: "start_order", title: "🛒 Realizar Pedido" } }, { type: "reply", reply: { id: "contact_agent", title: "🗣️ Hablar con asesor" } }] } };
@@ -144,23 +144,40 @@ app.post('/webhook', async (req, res) => {
               const candidateProducts = await findProductsInCatalog(originalText);
               if (candidateProducts.length === 0) {
                   await sendWhatsAppMessage(from, "Lo siento, no encontré productos que coincidan con tu búsqueda.");
-              } else if (candidateProducts.length === 1) {
-                  data.pendingProduct = candidateProducts[0];
-                  await sendWhatsAppMessage(from, `Encontré "${data.pendingProduct.productName}". ¿Qué cantidad necesitas?`);
-                  await setUserState(from, 'AWAITING_QUANTITY', data);
-              } else {
+              } else if (candidateProducts.length > 1) {
                   let clarificationMenu;
                   const validProducts = candidateProducts.filter(p => p.shortName && p.sku);
                   if (validProducts.length > 0 && validProducts.length <= 3) {
                       clarificationMenu = { type: 'button', body: { text: `Para "${originalText}", ¿a cuál de estos te refieres?` }, action: { buttons: validProducts.map(p => ({ type: 'reply', reply: { id: p.sku, title: p.shortName } })) } };
                   } else if (validProducts.length > 3) {
-                      clarificationMenu = { type: 'list', header: { type: 'text', text: 'Múltiples coincidencias' }, body: { text: `Para "${originalText}", ¿a cuál de estos te refieres?` }, action: { button: 'Ver opciones', sections: [{ title: 'Elige una presentación', rows: validProducts.slice(0, 10).map(p => ({ id: p.sku, title: p.shortName, description: p.productName })) }] } };
-                  } else {
-                      await sendWhatsAppMessage(from, "Lo siento, encontré coincidencias pero no pude generar las opciones.");
-                      break;
+                      clarificationMenu = { type: 'list', body: { text: `Para "${originalText}", ¿a cuál de estos te refieres?` }, action: { button: 'Ver opciones', sections: [{ title: 'Elige una presentación', rows: validProducts.slice(0, 10).map(p => ({ id: p.sku, title: p.shortName, description: p.productName })) }] } };
                   }
                   await sendWhatsAppMessage(from, '', 'interactive', clarificationMenu);
                   await setUserState(from, 'AWAITING_CLARIFICATION', data);
+              } else if (candidateProducts.length === 1) {
+                  const product = candidateProducts[0];
+                  const text = originalText.toLowerCase();
+                  const quantityMatch = text.match(/\d+/);
+                  const quantity = quantityMatch ? parseInt(quantityMatch[0]) : null;
+                  let unit = null;
+                  if (product.availableUnits) {
+                      for (const u of product.availableUnits) {
+                          if (text.includes(u.toLowerCase())) {
+                              unit = u;
+                              break;
+                          }
+                      }
+                  }
+                  if (quantity && unit) {
+                      const newOrderItem = { ...product, quantity, unit };
+                      if (!data.orderItems) data.orderItems = [];
+                      data.orderItems.push(newOrderItem);
+                      await showCartSummary(from, data);
+                  } else {
+                      data.pendingProduct = product;
+                      await sendWhatsAppMessage(from, `Encontré "${product.productName}". ¿Qué cantidad necesitas?`);
+                      await setUserState(from, 'AWAITING_QUANTITY', data);
+                  }
               }
               break;
           
@@ -213,9 +230,9 @@ app.post('/webhook', async (req, res) => {
                   await setUserState(from, 'AWAITING_ORDER_TEXT', data);
               } else if (userMessage === 'finish_order') {
                   const orderNumber = `PEDIDO-${Date.now()}`;
-                  const finalMessage = `¡Pedido confirmado! ✅\n\nTu número de orden es: *${orderNumber}*`;
+                  botResponseLog = `¡Pedido confirmado! ✅\n\nTu número de orden es: *${orderNumber}*`;
                   await db.collection('orders').add({ orderNumber, phoneNumber: from, status: 'CONFIRMED', orderDate: admin.firestore.FieldValue.serverTimestamp(), items: data.orderItems });
-                  await sendWhatsAppMessage(from, finalMessage);
+                  await sendWhatsAppMessage(from, botResponseLog);
                   await setUserState(from, 'IDLE', {});
               }
               break;
@@ -225,6 +242,16 @@ app.post('/webhook', async (req, res) => {
               await setUserState(from, 'IDLE', {});
               break;
       }
+
+      // --- GUARDADO DE CONVERSACIÓN RESTAURADO ---
+      await db.collection('conversations').add({
+          phoneNumber: from,
+          userMessage: originalText || userMessage,
+          botResponse: botResponseLog || '',
+          status: status,
+          timestamp: admin.firestore.FieldValue.serverTimestamp()
+      });
+
   } catch (error) {
       console.error('❌ ERROR en la lógica del bot:', error);
       await sendWhatsAppMessage(from, "Lo siento, estoy teniendo problemas técnicos.");
