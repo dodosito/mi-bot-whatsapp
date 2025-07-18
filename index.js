@@ -71,7 +71,6 @@ function levenshteinDistance(a, b) {
     return matrix[b.length][a.length];
 }
 
-
 // --- ¡FUNCIÓN DE BÚSQUEDA MEJORADA! ---
 async function findProductsInCatalog(text) {
     const normalizedUserText = normalizeText(text);
@@ -91,18 +90,15 @@ async function findProductsInCatalog(text) {
         const normalizedProductName = normalizeText(product.productName);
 
         searchKeywords.forEach(keyword => {
-            // Puntuación por coincidencia exacta en palabras clave
             if (product.searchTerms.map(term => normalizeText(term)).includes(keyword)) {
                 score += 3;
             }
-            // Puntuación por coincidencia parcial en el nombre del producto
             if (normalizedProductName.includes(keyword)) {
                 score += 1;
             }
-            // Puntuación por "parecido" (fuzzy) en palabras clave
             product.searchTerms.forEach(term => {
                 const distance = levenshteinDistance(keyword, normalizeText(term));
-                if (distance > 0 && distance <= 2) { // Permitimos hasta 2 errores de tipeo
+                if (distance > 0 && distance <= 2) {
                     score += 2;
                 }
             });
@@ -116,9 +112,8 @@ async function findProductsInCatalog(text) {
 
     if (maxScore === 0) return [];
     
-    // Devolvemos solo los productos con la puntuación más alta
-    const bestMatches = scoredProducts.filter(p => p.score === maxScore);
-    console.log(`✨ Mejores coincidencias encontradas (score ${maxScore}):`, bestMatches.map(p => p.productName));
+    const bestMatches = scoredProducts.filter(p => p.score >= maxScore);
+    console.log(`✨ Mejores coincidencias encontradas (score >= ${maxScore}):`, bestMatches.map(p => p.productName));
     return bestMatches;
 }
 
@@ -197,11 +192,7 @@ app.post('/webhook', async (req, res) => {
                 const candidateProducts = await findProductsInCatalog(originalText);
                 if (candidateProducts.length === 0) {
                     await sendWhatsAppMessage(from, "Lo siento, no encontré productos que coincidan con tu búsqueda.");
-                } else if (candidateProducts.length === 1) {
-                    data.pendingProduct = candidateProducts[0];
-                    await sendWhatsAppMessage(from, `Encontré "${data.pendingProduct.productName}". ¿Qué cantidad necesitas?`);
-                    await setUserState(from, 'AWAITING_QUANTITY', data);
-                } else {
+                } else if (candidateProducts.length > 1) {
                     let clarificationMenu;
                     const validProducts = candidateProducts.filter(p => p.shortName && p.sku);
                     if (validProducts.length > 0 && validProducts.length <= 3) {
@@ -215,6 +206,31 @@ app.post('/webhook', async (req, res) => {
                     data.originalTextForClarification = originalText;
                     await sendWhatsAppMessage(from, '', 'interactive', clarificationMenu);
                     await setUserState(from, 'AWAITING_CLARIFICATION', data);
+                } else if (candidateProducts.length === 1) {
+                    const product = candidateProducts[0];
+                    const text = originalText.toLowerCase();
+                    const quantityMatch = text.match(/(\d+)(?!ml)/);
+                    const quantity = quantityMatch ? parseInt(quantityMatch[0]) : null;
+                    let unit = null;
+                    if (product.availableUnits) {
+                        for (const u of product.availableUnits) {
+                            const unitRegex = new RegExp(`\\b${u.toLowerCase()}s?\\b`);
+                            if (text.match(unitRegex)) {
+                                unit = u;
+                                break;
+                            }
+                        }
+                    }
+                    if (quantity && unit) {
+                        const newOrderItem = { ...product, quantity, unit };
+                        if (!data.orderItems) data.orderItems = [];
+                        data.orderItems.push(newOrderItem);
+                        await showCartSummary(from, data);
+                    } else {
+                        data.pendingProduct = product;
+                        await sendWhatsAppMessage(from, `Encontré "${product.productName}". ¿Qué cantidad necesitas?`);
+                        await setUserState(from, 'AWAITING_QUANTITY', data);
+                    }
                 }
                 break;
             
