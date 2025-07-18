@@ -89,7 +89,7 @@ app.post('/webhook', async (req, res) => {
         const openRouterResponse = await axios.post(
           'https://openrouter.ai/api/v1/chat/completions',
           {
-            model: 'google/gemini-pro', // Usando el modelo original que tenías
+            model: 'openai/gpt-3.5-turbo', // Usando el modelo original que tenías
             messages: [{ role: 'user', content: userMessage }],
           },
           {
