@@ -74,19 +74,15 @@ async function findProductsInCatalog(text) {
     const normalizedUserText = normalizeText(text);
     const searchKeywords = normalizedUserText.split(' ').filter(word => word.length > 2);
     if (searchKeywords.length === 0) return [];
-
     const productsRef = db.collection('products');
     const snapshot = await productsRef.get();
     if (snapshot.empty) return [];
-
     let maxScore = 0;
     const scoredProducts = [];
-
     snapshot.forEach(doc => {
         const product = doc.data();
         let score = 0;
         const normalizedProductName = normalizeText(product.productName);
-
         searchKeywords.forEach(keyword => {
             if (product.searchTerms.map(term => normalizeText(term)).includes(keyword)) score += 3;
             if (normalizedProductName.includes(keyword)) score += 1;
@@ -95,15 +91,12 @@ async function findProductsInCatalog(text) {
                 if (distance > 0 && distance <= 2) score += 2;
             });
         });
-
         if (score > 0) {
             if (score > maxScore) maxScore = score;
             scoredProducts.push({ ...product, score });
         }
     });
-
     if (maxScore === 0) return [];
-    
     const bestMatches = scoredProducts.filter(p => p.score >= maxScore);
     console.log(`✨ Mejores coincidencias encontradas (score >= ${maxScore}):`, bestMatches.map(p => p.productName));
     return bestMatches;
@@ -113,7 +106,7 @@ async function splitTextIntoItemsAI(userText) {
     console.log("🤖 Usando IA para dividir la lista de productos...");
     const prompt = `
       Tu única tarea es analizar el texto de un cliente y separarlo en una lista de productos individuales.
-      Corrige errores de tipeo obvios en los nombres de los productos.
+      Corrige errores de tipeo obvios.
       Texto del Cliente: "${userText}"
       Responde únicamente con un array de strings en formato JSON. No incluyas nada más en tu respuesta.
       Ejemplo:
@@ -157,15 +150,19 @@ async function processNextItemInQueue(from, data) {
         await processNextItemInQueue(from, data);
     } else if (candidateProducts.length > 1) {
         // --- MEJORA 2: Texto de desambiguación más conversacional ---
-        const initialMessage = `Identifiqué ${candidateProducts.length} productos posibles para "${nextItemText}", vamos a completar la información.`;
-        await sendWhatsAppMessage(from, initialMessage);
+        if (data.initialItemCount) {
+            const initialMessage = `Identifiqué ${data.initialItemCount} productos. ¡Vamos a completarlos!\n\nPara: "${nextItemText}"`;
+            await sendWhatsAppMessage(from, initialMessage);
+            delete data.initialItemCount; // Para que no se repita
+        }
 
         let clarificationMenu;
         const validProducts = candidateProducts.filter(p => p.shortName && p.sku);
+        const menuBody = data.initialItemCount ? `Primero, ¿a cuál de estos te refieres?` : `Para "${nextItemText}", ¿a cuál de estos te refieres?`;
         if (validProducts.length > 0 && validProducts.length <= 3) {
-            clarificationMenu = { type: 'button', body: { text: `Primero, ¿a cuál de estos te refieres?` }, action: { buttons: validProducts.map(p => ({ type: 'reply', reply: { id: p.sku, title: p.shortName } })) } };
+            clarificationMenu = { type: 'button', body: { text: menuBody }, action: { buttons: validProducts.map(p => ({ type: 'reply', reply: { id: p.sku, title: p.shortName } })) } };
         } else {
-            clarificationMenu = { type: 'list', body: { text: `Primero, ¿a cuál de estos te refieres?` }, action: { button: 'Ver opciones', sections: [{ title: 'Elige una presentación', rows: validProducts.slice(0, 10).map(p => ({ id: p.sku, title: p.shortName, description: p.productName })) }] } };
+            clarificationMenu = { type: 'list', body: { text: menuBody }, action: { button: 'Ver opciones', sections: [{ title: 'Elige una presentación', rows: validProducts.slice(0, 10).map(p => ({ id: p.sku, title: p.shortName, description: p.productName })) }] } };
         }
         data.originalTextForClarification = nextItemText;
         await sendWhatsAppMessage(from, '', 'interactive', clarificationMenu);
@@ -210,9 +207,7 @@ async function showCartSummary(from, data) {
     }
     summary += "\n¿Qué deseas hacer?";
 
-    const buttons = [
-        { type: 'reply', reply: { id: 'add_more_products', title: '➕ Añadir más' } }
-    ];
+    const buttons = [ { type: 'reply', reply: { id: 'add_more_products', title: '➕ Añadir más' } } ];
     if (data.orderItems && data.orderItems.length > 0) {
         buttons.push({ type: 'reply', reply: { id: 'delete_item_start', title: '🗑️ Eliminar producto' } });
     }
@@ -283,6 +278,7 @@ app.post('/webhook', async (req, res) => {
                 const items = await splitTextIntoItemsAI(originalText);
                 if (items && items.length > 0) {
                     data.itemsQueue = items;
+                    data.initialItemCount = items.length; // Guardamos el número inicial de ítems
                     await processNextItemInQueue(from, data);
                 } else {
                     await sendWhatsAppMessage(from, "No pude identificar productos en tu pedido. Por favor, intenta de nuevo.");
@@ -403,8 +399,8 @@ app.post('/webhook', async (req, res) => {
                                     title: 'Tu pedido actual',
                                     rows: data.orderItems.map((item, index) => ({
                                         id: `delete_item_index_${index}`,
-                                        title: `${item.quantity} ${item.unit} de ${item.shortName}`,
-                                        description: item.productName
+                                        title: item.shortName,
+                                        description: `${item.quantity} ${item.unit}`
                                     }))
                                 }]
                             }
