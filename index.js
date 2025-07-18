@@ -48,6 +48,55 @@ async function sendWhatsAppMessage(to, messageBody, messageType = 'text', intera
     }
 }
 
+async function extractOrderDetailsWithAI(userText, candidateProducts) {
+    console.log("🤖 Usando IA para extraer detalles del pedido...");
+    const productListForPrompt = candidateProducts.map(p => `- SKU: ${p.sku}, Nombre: ${p.productName}, Unidades: [${p.availableUnits.join(", ")}]`).join('\n');
+
+    const prompt = `
+      Tu tarea es analizar el texto de un cliente y extraer los detalles de su pedido en formato JSON.
+      Usa la siguiente lista de productos como referencia. Solo puedes usar productos de esta lista.
+      
+      Lista de Productos Válidos:
+      ${productListForPrompt}
+
+      Texto del Cliente: "${userText}"
+
+      Analiza el texto y devuelve un único objeto JSON con las claves "sku", "quantity" y "unit".
+      - "sku": El SKU del producto que mejor coincida de forma específica.
+      - "quantity": El número de la cantidad.
+      - "unit": La unidad de medida mencionada.
+      Si no puedes encontrar alguno de los valores, usa null.
+      Responde únicamente con el objeto JSON, sin texto adicional.
+    `;
+
+    try {
+        const response = await axios.post(
+            'https://openrouter.ai/api/v1/chat/completions',
+            {
+                model: 'nousresearch/nous-hermes-2-mixtral-8x7b-dpo:free', // Un modelo gratuito y potente pero más ligero
+                messages: [{ role: 'system', content: prompt }]
+            },
+            { headers: { 'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}` } }
+        );
+
+        let content = response.data.choices[0].message.content;
+        console.log("🧠 Respuesta cruda de la IA:", content);
+
+        const jsonMatch = content.match(/\{[\s\S]*\}/);
+        if (!jsonMatch) {
+            console.error("❌ La IA no devolvió un JSON válido.");
+            return null;
+        }
+
+        const result = JSON.parse(jsonMatch[0]);
+        console.log("🧠 IA extrajo (limpio):", result);
+        return result;
+    } catch (error) {
+        console.error("❌ Error en la extracción con IA:", error.message);
+        return null;
+    }
+}
+
 async function findProductsInCatalog(text) {
     const searchKeywords = text.toLowerCase().split(' ').filter(word => word.length > 2);
     if (searchKeywords.length === 0) return [];
@@ -75,6 +124,7 @@ async function showCartSummary(from, data) {
         summary += `• ${item.quantity} ${item.unit} de ${item.productName}\n`;
     });
     summary += "\n¿Qué deseas hacer?";
+
     const cartMenu = { type: 'button', body: { text: summary }, action: { buttons: [{ type: 'reply', reply: { id: 'add_more_products', title: '➕ Añadir más' } }, { type: 'reply', reply: { id: 'finish_order', title: '✅ Finalizar Pedido' } }] } };
     await sendWhatsAppMessage(from, '', 'interactive', cartMenu);
     await setUserState(from, 'AWAITING_ORDER_ACTION', data);
@@ -144,23 +194,34 @@ app.post('/webhook', async (req, res) => {
               const candidateProducts = await findProductsInCatalog(originalText);
               if (candidateProducts.length === 0) {
                   await sendWhatsAppMessage(from, "Lo siento, no encontré productos que coincidan con tu búsqueda.");
-              } else if (candidateProducts.length === 1) {
-                  data.pendingProduct = candidateProducts[0];
-                  await sendWhatsAppMessage(from, `Encontré "${data.pendingProduct.productName}". ¿Qué cantidad necesitas?`);
-                  await setUserState(from, 'AWAITING_QUANTITY', data);
-              } else {
-                  let clarificationMenu;
-                  const validProducts = candidateProducts.filter(p => p.shortName && p.sku);
-                  if (validProducts.length > 0 && validProducts.length <= 3) {
-                      clarificationMenu = { type: 'button', body: { text: `Para "${originalText}", ¿a cuál de estos te refieres?` }, action: { buttons: validProducts.map(p => ({ type: 'reply', reply: { id: p.sku, title: p.shortName } })) } };
-                  } else if (validProducts.length > 3) {
-                      clarificationMenu = { type: 'list', header: { type: 'text', text: 'Múltiples coincidencias' }, body: { text: `Para "${originalText}", ¿a cuál de estos te refieres?` }, action: { button: 'Ver opciones', sections: [{ title: 'Elige una presentación', rows: validProducts.slice(0, 10).map(p => ({ id: p.sku, title: p.shortName, description: p.productName })) }] } };
-                  } else {
-                      await sendWhatsAppMessage(from, "Lo siento, encontré coincidencias pero no pude generar las opciones.");
-                      break;
+                  break;
+              }
+
+              const extractedDetails = await extractOrderDetailsWithAI(originalText, candidateProducts);
+              if (extractedDetails && extractedDetails.sku && extractedDetails.quantity && extractedDetails.unit) {
+                  const productDoc = await db.collection('products').doc(extractedDetails.sku).get();
+                  if (productDoc.exists) {
+                      const newOrderItem = { ...productDoc.data(), quantity: extractedDetails.quantity, unit: extractedDetails.unit };
+                      if (!data.orderItems) data.orderItems = [];
+                      data.orderItems.push(newOrderItem);
+                      await showCartSummary(from, data);
                   }
-                  await sendWhatsAppMessage(from, '', 'interactive', clarificationMenu);
-                  await setUserState(from, 'AWAITING_CLARIFICATION', data);
+              } else {
+                  if (candidateProducts.length > 1) {
+                      let clarificationMenu;
+                      const validProducts = candidateProducts.filter(p => p.shortName && p.sku);
+                      if (validProducts.length > 0 && validProducts.length <= 3) {
+                          clarificationMenu = { type: 'button', body: { text: `Para "${originalText}", ¿a cuál de estos te refieres?` }, action: { buttons: validProducts.map(p => ({ type: 'reply', reply: { id: p.sku, title: p.shortName } })) } };
+                      } else if (validProducts.length > 3) {
+                          clarificationMenu = { type: 'list', header: { type: 'text', text: 'Múltiples coincidencias' }, body: { text: `Para "${originalText}", ¿a cuál de estos te refieres?` }, action: { button: 'Ver opciones', sections: [{ title: 'Elige una presentación', rows: validProducts.slice(0, 10).map(p => ({ id: p.sku, title: p.shortName, description: p.productName })) }] } };
+                      }
+                      await sendWhatsAppMessage(from, '', 'interactive', clarificationMenu);
+                      await setUserState(from, 'AWAITING_CLARIFICATION', data);
+                  } else {
+                      data.pendingProduct = candidateProducts[0];
+                      await sendWhatsAppMessage(from, `Encontré "${data.pendingProduct.productName}". ¿Qué cantidad necesitas?`);
+                      await setUserState(from, 'AWAITING_QUANTITY', data);
+                  }
               }
               break;
           
