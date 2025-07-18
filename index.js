@@ -74,15 +74,19 @@ async function findProductsInCatalog(text) {
     const normalizedUserText = normalizeText(text);
     const searchKeywords = normalizedUserText.split(' ').filter(word => word.length > 2);
     if (searchKeywords.length === 0) return [];
+
     const productsRef = db.collection('products');
     const snapshot = await productsRef.get();
     if (snapshot.empty) return [];
+
     let maxScore = 0;
     const scoredProducts = [];
+
     snapshot.forEach(doc => {
         const product = doc.data();
         let score = 0;
         const normalizedProductName = normalizeText(product.productName);
+
         searchKeywords.forEach(keyword => {
             if (product.searchTerms.map(term => normalizeText(term)).includes(keyword)) score += 3;
             if (normalizedProductName.includes(keyword)) score += 1;
@@ -91,12 +95,15 @@ async function findProductsInCatalog(text) {
                 if (distance > 0 && distance <= 2) score += 2;
             });
         });
+
         if (score > 0) {
             if (score > maxScore) maxScore = score;
             scoredProducts.push({ ...product, score });
         }
     });
+
     if (maxScore === 0) return [];
+    
     const bestMatches = scoredProducts.filter(p => p.score >= maxScore);
     console.log(`✨ Mejores coincidencias encontradas (score >= ${maxScore}):`, bestMatches.map(p => p.productName));
     return bestMatches;
@@ -150,7 +157,7 @@ async function processNextItemInQueue(from, data) {
         await processNextItemInQueue(from, data);
     } else if (candidateProducts.length > 1) {
         // --- MEJORA 2: Texto de desambiguación más conversacional ---
-        const initialMessage = `Identifiqué ${candidateProducts.length} productos posibles para "${nextItemText}", vamos a completar la información faltante.`;
+        const initialMessage = `Identifiqué ${candidateProducts.length} productos posibles para "${nextItemText}", vamos a completar la información.`;
         await sendWhatsAppMessage(from, initialMessage);
 
         let clarificationMenu;
@@ -195,7 +202,7 @@ async function showCartSummary(from, data) {
     }
     let summary = "*Este es tu pedido hasta ahora:*\n\n";
     if (data.orderItems && data.orderItems.length > 0) {
-        data.orderItems.forEach((item, index) => {
+        data.orderItems.forEach(item => {
             summary += `• ${item.quantity} ${item.unit} de ${item.productName}\n`;
         });
     } else {
@@ -203,7 +210,6 @@ async function showCartSummary(from, data) {
     }
     summary += "\n¿Qué deseas hacer?";
 
-    // --- MEJORA 1: Añadir botón de eliminar si hay productos ---
     const buttons = [
         { type: 'reply', reply: { id: 'add_more_products', title: '➕ Añadir más' } }
     ];
@@ -261,23 +267,110 @@ app.post('/webhook', async (req, res) => {
         switch (status) {
             case 'IDLE':
             case 'AWAITING_MAIN_MENU_CHOICE':
-                // ... sin cambios ...
+                if (userMessage === 'start_order') {
+                    botResponseLog = "Por favor, ingresa tu pedido. Puedes incluir varios productos.\n\n*(Por ej: 5 cajas de cerveza pilsen y 3 gaseosas)*";
+                    await sendWhatsAppMessage(from, botResponseLog);
+                    await setUserState(from, 'AWAITING_ORDER_TEXT', { orderItems: [] });
+                } else {
+                    const mainMenu = { type: "button", body: { text: `¡Hola! Soy tu asistente virtual.` }, action: { buttons: [{ type: "reply", reply: { id: "start_order", title: "🛒 Realizar Pedido" } }, { type: "reply", reply: { id: "contact_agent", title: "🗣️ Hablar con asesor" } }] } };
+                    await sendWhatsAppMessage(from, '', 'interactive', mainMenu);
+                    botResponseLog = "Menú principal enviado.";
+                    await setUserState(from, 'AWAITING_MAIN_MENU_CHOICE', {});
+                }
                 break;
 
             case 'AWAITING_ORDER_TEXT':
-                // ... sin cambios ...
+                const items = await splitTextIntoItemsAI(originalText);
+                if (items && items.length > 0) {
+                    data.itemsQueue = items;
+                    await processNextItemInQueue(from, data);
+                } else {
+                    await sendWhatsAppMessage(from, "No pude identificar productos en tu pedido. Por favor, intenta de nuevo.");
+                }
                 break;
             
             case 'AWAITING_CLARIFICATION':
-                // ... sin cambios ...
+                const productDoc = await db.collection('products').doc(userMessage).get();
+                if (productDoc.exists) {
+                    const product = productDoc.data();
+                    const text = data.originalTextForClarification.toLowerCase();
+                    const quantityMatch = text.match(/(\d+)(?!ml)/);
+                    const quantity = quantityMatch ? parseInt(quantityMatch[0]) : null;
+                    let unit = null;
+                    if (product.availableUnits) {
+                        for (const u of product.availableUnits) {
+                            const unitRegex = new RegExp(`\\b${u.toLowerCase()}s?\\b`);
+                            if (text.match(unitRegex)) { unit = u; break; }
+                        }
+                    }
+                    delete data.originalTextForClarification;
+                    if (quantity && unit) {
+                        const newOrderItem = { ...product, quantity, unit };
+                        if (!data.orderItems) data.orderItems = [];
+                        data.orderItems.push(newOrderItem);
+                        await processNextItemInQueue(from, data);
+                    } else {
+                        data.pendingProduct = product;
+                        await sendWhatsAppMessage(from, `Seleccionaste "${product.productName}". ¿Qué cantidad necesitas?`);
+                        await setUserState(from, 'AWAITING_QUANTITY', data);
+                    }
+                }
                 break;
 
             case 'AWAITING_QUANTITY':
-                // ... sin cambios ...
+                const product = data.pendingProduct;
+                const text = normalizeText(originalText);
+                const quantityMatch = text.match(/(\d+)(?!ml)/);
+                const quantity = quantityMatch ? parseInt(quantityMatch[0]) : null;
+                if (!quantity) {
+                    await sendWhatsAppMessage(from, "Por favor, ingresa una cantidad numérica válida.");
+                    break;
+                }
+                let unit = null;
+                if (product.availableUnits) {
+                    let bestUnitMatch = { unit: null, distance: 3 };
+                    const wordsInText = text.split(' ');
+                    wordsInText.forEach(word => {
+                        product.availableUnits.forEach(availUnit => {
+                            const distance = levenshteinDistance(word, normalizeText(availUnit));
+                            if (distance < bestUnitMatch.distance && distance <= 2) {
+                                bestUnitMatch = { unit: availUnit, distance: distance };
+                            }
+                        });
+                    });
+                    if (bestUnitMatch.distance <= 2) {
+                        unit = bestUnitMatch.unit;
+                    }
+                }
+                if (unit) {
+                    const newOrderItem = { ...product, quantity, unit };
+                    if (!data.orderItems) data.orderItems = [];
+                    data.orderItems.push(newOrderItem);
+                    delete data.pendingProduct;
+                    await processNextItemInQueue(from, data);
+                } else if (product.availableUnits && product.availableUnits.length > 1) {
+                    data.pendingQuantity = quantity;
+                    const unitMenu = { type: 'button', body: { text: `Entendido, ${quantity}. ¿En qué unidad?` }, action: { buttons: product.availableUnits.slice(0, 3).map(u => ({ type: 'reply', reply: { id: u.toLowerCase(), title: u } })) } };
+                    await sendWhatsAppMessage(from, '', 'interactive', unitMenu);
+                    await setUserState(from, 'AWAITING_UOM', data);
+                } else {
+                    const singleUnit = (product.availableUnits && product.availableUnits.length === 1) ? product.availableUnits[0] : 'unidad';
+                    const newOrderItem = { ...product, quantity, unit: singleUnit };
+                    if (!data.orderItems) data.orderItems = [];
+                    data.orderItems.push(newOrderItem);
+                    delete data.pendingProduct;
+                    await processNextItemInQueue(from, data);
+                }
                 break;
 
             case 'AWAITING_UOM':
-                // ... sin cambios ...
+                const selectedUnit = userMessage;
+                const newOrderItem = { ...data.pendingProduct, quantity: data.pendingQuantity, unit: selectedUnit };
+                if (!data.orderItems) data.orderItems = [];
+                data.orderItems.push(newOrderItem);
+                delete data.pendingProduct;
+                delete data.pendingQuantity;
+                await processNextItemInQueue(from, data);
                 break;
 
             case 'AWAITING_ORDER_ACTION':
@@ -286,7 +379,6 @@ app.post('/webhook', async (req, res) => {
                     await sendWhatsAppMessage(from, '', 'interactive', askMoreMenu);
                     await setUserState(from, 'AWAITING_ORDER_TEXT', data);
                 } else if (userMessage === 'finish_order_start') {
-                    // --- MEJORA 3: Confirmación con botones Sí/No ---
                     const confirmMenu = {
                         type: 'button',
                         body: { text: '¿Estás seguro de que deseas finalizar tu pedido?' },
@@ -300,18 +392,17 @@ app.post('/webhook', async (req, res) => {
                     await sendWhatsAppMessage(from, '', 'interactive', confirmMenu);
                     await setUserState(from, 'AWAITING_FINAL_CONFIRMATION', data);
                 } else if (userMessage === 'delete_item_start') {
-                    // --- MEJORA 1: Lógica para mostrar lista de ítems a eliminar ---
                     if (data.orderItems && data.orderItems.length > 0) {
                         const deleteMenu = {
                             type: 'list',
                             header: { type: 'text', text: 'Eliminar Producto' },
-                            body: { text: 'Por favor, selecciona el producto que deseas eliminar de tu pedido.' },
+                            body: { text: 'Por favor, selecciona el producto que deseas eliminar.' },
                             action: {
                                 button: 'Ver productos',
                                 sections: [{
                                     title: 'Tu pedido actual',
                                     rows: data.orderItems.map((item, index) => ({
-                                        id: `delete_item_index_${index}`, // Usamos el índice para saber cuál borrar
+                                        id: `delete_item_index_${index}`,
                                         title: `${item.quantity} ${item.unit} de ${item.shortName}`,
                                         description: item.productName
                                     }))
@@ -320,14 +411,10 @@ app.post('/webhook', async (req, res) => {
                         };
                         await sendWhatsAppMessage(from, '', 'interactive', deleteMenu);
                         await setUserState(from, 'AWAITING_DELETE_CHOICE', data);
-                    } else {
-                        await sendWhatsAppMessage(from, "Tu carrito ya está vacío.");
-                        await showCartSummary(from, data);
                     }
                 }
                 break;
 
-            // --- MEJORA 1: Nuevo estado para manejar la eliminación ---
             case 'AWAITING_DELETE_CHOICE':
                 if (userMessage.startsWith('delete_item_index_')) {
                     const indexToDelete = parseInt(userMessage.replace('delete_item_index_', ''));
@@ -336,11 +423,9 @@ app.post('/webhook', async (req, res) => {
                         await sendWhatsAppMessage(from, `Se ha eliminado "${removedItem[0].productName}" de tu pedido.`);
                     }
                 }
-                // Después de eliminar (o si no se eligió nada), volvemos al carrito
                 await showCartSummary(from, data);
                 break;
 
-            // --- MEJORA 3: Nuevo estado para manejar la confirmación final ---
             case 'AWAITING_FINAL_CONFIRMATION':
                 if (userMessage === 'finish_order_confirm_yes') {
                     const orderNumber = `PEDIDO-${Date.now()}`;
@@ -348,7 +433,7 @@ app.post('/webhook', async (req, res) => {
                     await db.collection('orders').add({ orderNumber, phoneNumber: from, status: 'CONFIRMED', orderDate: admin.firestore.FieldValue.serverTimestamp(), items: data.orderItems });
                     await sendWhatsAppMessage(from, botResponseLog);
                     await setUserState(from, 'IDLE', {});
-                } else { // Si dice 'No' o cualquier otra cosa
+                } else {
                     await sendWhatsAppMessage(from, "Ok, volvemos a tu pedido.");
                     await showCartSummary(from, data);
                 }
