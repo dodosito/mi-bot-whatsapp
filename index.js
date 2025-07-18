@@ -13,78 +13,85 @@ if (!admin.apps.length) {
 }
 const db = admin.firestore();
 
+// --- UTILIDAD PARA NORMALIZAR TEXTO ---
+function normalizeText(text) {
+  return text
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/\p{Diacritic}/gu, '')
+    .replace(/[^a-z0-9 ]/g, '')
+    .trim();
+}
+
 // --- FUNCIONES DE UTILIDAD ---
 async function getUserState(phoneNumber) {
-    const userStateRef = db.collection('user_states').doc(phoneNumber);
-    const doc = await userStateRef.get();
-    return doc.exists ? doc.data() : { status: 'IDLE', data: {} };
+  const userStateRef = db.collection('user_states').doc(phoneNumber);
+  const doc = await userStateRef.get();
+  return doc.exists ? doc.data() : { status: 'IDLE', data: {} };
 }
 
 async function setUserState(phoneNumber, status, data = {}) {
-    const userStateRef = db.collection('user_states').doc(phoneNumber);
-    await userStateRef.set({ status, data, lastUpdated: admin.firestore.FieldValue.serverTimestamp() });
+  const userStateRef = db.collection('user_states').doc(phoneNumber);
+  await userStateRef.set({ status, data, lastUpdated: admin.firestore.FieldValue.serverTimestamp() });
 }
 
 async function sendWhatsAppMessage(to, messageBody, messageType = 'text', interactivePayload = null) {
-    const payload = {
-        messaging_product: 'whatsapp',
-        to: to,
-        type: messageType,
-    };
-    if (messageType === 'text') {
-        payload.text = { body: messageBody, preview_url: false };
-    } else if (messageType === 'interactive' && interactivePayload) {
-        payload.interactive = interactivePayload;
-    }
-    try {
-        await axios.post(
-            `https://graph.facebook.com/v19.0/${process.env.PHONE_NUMBER_ID}/messages`,
-            payload,
-            { headers: { 'Authorization': `Bearer ${process.env.WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' } }
-        );
-        console.log(`✅ Mensaje tipo '${messageType}' enviado a ${to}.`);
-    } catch (error) {
-        console.error('❌ ERROR al enviar mensaje a WhatsApp:', error.response ? JSON.stringify(error.response.data, null, 2) : error.message);
-    }
+  const payload = {
+    messaging_product: 'whatsapp',
+    to: to,
+    type: messageType,
+  };
+  if (messageType === 'text') {
+    payload.text = { body: messageBody, preview_url: false };
+  } else if (messageType === 'interactive' && interactivePayload) {
+    payload.interactive = interactivePayload;
+  }
+  try {
+    await axios.post(
+      `https://graph.facebook.com/v19.0/${process.env.PHONE_NUMBER_ID}/messages`,
+      payload,
+      { headers: { 'Authorization': `Bearer ${process.env.WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' } }
+    );
+    console.log(`✅ Mensaje tipo '${messageType}' enviado a ${to}.`);
+  } catch (error) {
+    console.error('❌ ERROR al enviar mensaje a WhatsApp:', error.response ? JSON.stringify(error.response.data, null, 2) : error.message);
+  }
 }
 
 async function findProductsInCatalog(text) {
-    const searchKeywords = text.toLowerCase().split(' ').filter(word => word.length > 2);
-    if (searchKeywords.length === 0) return [];
-    const productsRef = db.collection('products');
-    const snapshot = await productsRef.where('searchTerms', 'array-contains-any', searchKeywords).get();
-    if (snapshot.empty) return [];
-    let maxScore = 0;
-    const scoredProducts = snapshot.docs.map(doc => {
-        const product = doc.data();
-        let score = 0;
-        searchKeywords.forEach(keyword => {
-            if (product.searchTerms.includes(keyword)) score++;
-        });
-        if (score > maxScore) maxScore = score;
-        return { ...product, score };
-    });
-    const bestMatches = scoredProducts.filter(p => p.score === maxScore);
-    console.log(`✨ Mejores coincidencias encontradas:`, bestMatches.map(p => p.productName));
-    return bestMatches;
+  const normalizedText = normalizeText(text);
+  const searchKeywords = normalizedText.split(' ').filter(w => w.length > 2);
+  if (searchKeywords.length === 0) return [];
+  const productsRef = db.collection('products');
+  const snapshot = await productsRef.get();
+  if (snapshot.empty) return [];
+
+  let maxScore = 0;
+  const scoredProducts = snapshot.docs.map(doc => {
+    const product = doc.data();
+    let score = 0;
+    const normalizedProductName = normalizeText(product.productName);
+
+    for (const keyword of searchKeywords) {
+      if (product.searchTerms?.includes(keyword)) score += 2;
+      if (normalizedProductName.includes(keyword)) score += 1;
+    }
+    if (score > maxScore) maxScore = score;
+    return { ...product, score };
+  });
+
+  const bestMatches = scoredProducts.filter(p => p.score === maxScore && maxScore > 0);
+  console.log(`✨ Mejores coincidencias encontradas:`, bestMatches.map(p => p.productName));
+  return bestMatches;
 }
 
-async function showCartSummary(from, data) {
-    let summary = "*Este es tu pedido hasta ahora:*\n\n";
-    data.orderItems.forEach(item => {
-        summary += `• ${item.quantity} ${item.unit} de ${item.productName}\n`;
-    });
-    summary += "\n¿Qué deseas hacer?";
-    const cartMenu = { type: 'button', body: { text: summary }, action: { buttons: [{ type: 'reply', reply: { id: 'add_more_products', title: '➕ Añadir más' } }, { type: 'reply', reply: { id: 'finish_order', title: '✅ Finalizar Pedido' } }] } };
-    await sendWhatsAppMessage(from, '', 'interactive', cartMenu);
-    await setUserState(from, 'AWAITING_ORDER_ACTION', data);
-}
-
-// --- VARIABLES DE ENTORNO Y RUTAS ---
+// --- ENDPOINTS BÁSICOS ---
 const PORT = process.env.PORT || 3000;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
+
 app.get('/', (req, res) => res.status(200).send('Bot activo.'));
 app.get('/health', (req, res) => res.sendStatus(200));
+
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
@@ -96,159 +103,12 @@ app.get('/webhook', (req, res) => {
   }
 });
 
-// --- RUTA PRINCIPAL PARA RECIBIR MENSAJES ---
-app.post('/webhook', async (req, res) => {
-  if (!req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0]) {
-    return res.sendStatus(200);
-  }
-  
-  const message = req.body.entry[0].changes[0].value.messages[0];
-  const from = message.from;
-  let userMessage, originalText = '', botResponseLog = '';
+// --- EXPORTAR APP PARA DEPLOY EN RAILWAY ---
+module.exports = app;
 
-  if (message.type === 'text') {
-      userMessage = originalText = message.text.body;
-  } else if (message.interactive) {
-      userMessage = message.interactive[message.interactive.type].id;
-  } else { return res.sendStatus(200); }
-  
-  try {
-      const currentUserState = await getUserState(from);
-      let { status, data = {} } = currentUserState;
-
-      if (userMessage.toLowerCase().trim() === 'resetear') {
-          await setUserState(from, 'IDLE', {});
-          await sendWhatsAppMessage(from, 'Estado reseteado. ✅');
-          botResponseLog = 'Estado reseteado.';
-      } else {
-        switch (status) {
-            case 'IDLE':
-            case 'AWAITING_MAIN_MENU_CHOICE':
-                if (userMessage === 'start_order') {
-                    botResponseLog = "Por favor, ingresa tu pedido. Puedes incluir varios productos.\n\n*(Por ej: 5 cajas de cerveza pilsen y 3 gaseosas)*";
-                    await sendWhatsAppMessage(from, botResponseLog);
-                    await setUserState(from, 'AWAITING_ORDER_TEXT', { orderItems: [] });
-                } else {
-                    const mainMenu = { type: "button", body: { text: `¡Hola! Soy tu asistente virtual.` }, action: { buttons: [{ type: "reply", reply: { id: "start_order", title: "🛒 Realizar Pedido" } }, { type: "reply", reply: { id: "contact_agent", title: "🗣️ Hablar con asesor" } }] } };
-                    await sendWhatsAppMessage(from, '', 'interactive', mainMenu);
-                    botResponseLog = "Menú principal enviado.";
-                    await setUserState(from, 'AWAITING_MAIN_MENU_CHOICE', {});
-                }
-                break;
-
-            case 'AWAITING_ORDER_TEXT':
-                if (userMessage === 'back_to_cart') {
-                    await showCartSummary(from, data);
-                    break;
-                }
-                const candidateProducts = await findProductsInCatalog(originalText);
-                if (candidateProducts.length === 0) {
-                    botResponseLog = "Lo siento, no encontré productos que coincidan con tu búsqueda.";
-                    await sendWhatsAppMessage(from, botResponseLog);
-                } else if (candidateProducts.length === 1) {
-                    data.pendingProduct = candidateProducts[0];
-                    botResponseLog = `Encontré "${data.pendingProduct.productName}". ¿Qué cantidad necesitas?`;
-                    await sendWhatsAppMessage(from, botResponseLog);
-                    await setUserState(from, 'AWAITING_QUANTITY', data);
-                } else {
-                    let clarificationMenu;
-                    const validProducts = candidateProducts.filter(p => p.shortName && p.sku);
-                    if (validProducts.length > 0 && validProducts.length <= 3) {
-                        clarificationMenu = { type: 'button', body: { text: `Para "${originalText}", ¿a cuál de estos te refieres?` }, action: { buttons: validProducts.map(p => ({ type: 'reply', reply: { id: p.sku, title: p.shortName } })) } };
-                    } else if (validProducts.length > 3) {
-                        clarificationMenu = { type: 'list', body: { text: `Para "${originalText}", ¿a cuál de estos te refieres?` }, action: { button: 'Ver opciones', sections: [{ title: 'Elige una presentación', rows: validProducts.slice(0, 10).map(p => ({ id: p.sku, title: p.shortName, description: p.productName })) }] } };
-                    }
-                    await sendWhatsAppMessage(from, '', 'interactive', clarificationMenu);
-                    botResponseLog = "Menú de desambiguación enviado.";
-                    await setUserState(from, 'AWAITING_CLARIFICATION', data);
-                }
-                break;
-            
-            case 'AWAITING_CLARIFICATION':
-                const productDoc = await db.collection('products').doc(userMessage).get();
-                if (productDoc.exists) {
-                    data.pendingProduct = productDoc.data();
-                    botResponseLog = `Seleccionaste "${data.pendingProduct.productName}". ¿Qué cantidad necesitas?`;
-                    await sendWhatsAppMessage(from, botResponseLog);
-                    await setUserState(from, 'AWAITING_QUANTITY', data);
-                }
-                break;
-
-            case 'AWAITING_QUANTITY':
-                const quantity = parseInt(userMessage);
-                if (isNaN(quantity) || quantity <= 0) {
-                    botResponseLog = "Por favor, ingresa una cantidad numérica válida.";
-                    await sendWhatsAppMessage(from, botResponseLog);
-                    break;
-                }
-                data.pendingQuantity = quantity;
-                const product = data.pendingProduct;
-                if (product && product.availableUnits && product.availableUnits.length > 1) {
-                    const unitMenu = { type: 'button', body: { text: `Entendido, ${quantity}. ¿En qué unidad?` }, action: { buttons: product.availableUnits.slice(0, 3).map(unit => ({ type: 'reply', reply: { id: unit.toLowerCase(), title: unit } })) } };
-                    await sendWhatsAppMessage(from, '', 'interactive', unitMenu);
-                    botResponseLog = "Preguntando por unidad de medida.";
-                    await setUserState(from, 'AWAITING_UOM', data);
-                } else {
-                    const unit = (product.availableUnits && product.availableUnits.length === 1) ? product.availableUnits[0] : 'unidad';
-                    const newOrderItem = { ...data.pendingProduct, quantity: data.pendingQuantity, unit: unit };
-                    if (!data.orderItems) data.orderItems = [];
-                    data.orderItems.push(newOrderItem);
-                    delete data.pendingProduct;
-                    delete data.pendingQuantity;
-                    await showCartSummary(from, data);
-                }
-                break;
-
-            case 'AWAITING_UOM':
-                const selectedUnit = userMessage;
-                const newOrderItem = { ...data.pendingProduct, quantity: data.pendingQuantity, unit: selectedUnit };
-                if (!data.orderItems) data.orderItems = [];
-                data.orderItems.push(newOrderItem);
-                delete data.pendingProduct;
-                delete data.pendingQuantity;
-                await showCartSummary(from, data);
-                break;
-
-            case 'AWAITING_ORDER_ACTION':
-                if (userMessage === 'add_more_products') {
-                    const askMoreMenu = { type: 'button', body: { text: "Claro, ¿qué más deseas añadir?" }, action: { buttons: [{ type: 'reply', reply: { id: 'back_to_cart', title: '↩️ Ver mi pedido' } }] } };
-                    await sendWhatsAppMessage(from, '', 'interactive', askMoreMenu);
-                    await setUserState(from, 'AWAITING_ORDER_TEXT', data);
-                } else if (userMessage === 'finish_order') {
-                    const orderNumber = `PEDIDO-${Date.now()}`;
-                    botResponseLog = `¡Pedido confirmado! ✅\n\nTu número de orden es: *${orderNumber}*`;
-                    await db.collection('orders').add({ orderNumber, phoneNumber: from, status: 'CONFIRMED', orderDate: admin.firestore.FieldValue.serverTimestamp(), items: data.orderItems });
-                    await sendWhatsAppMessage(from, botResponseLog);
-                    await setUserState(from, 'IDLE', {});
-                }
-                break;
-
-            default:
-                botResponseLog = 'Lo siento, hubo un error. Empieza de nuevo.';
-                await sendWhatsAppMessage(from, botResponseLog);
-                await setUserState(from, 'IDLE', {});
-                break;
-        }
-      }
-
-      // --- GUARDADO DE CONVERSACIÓN RESTAURADO ---
-      await db.collection('conversations').add({
-          phoneNumber: from,
-          userMessage: originalText || userMessage,
-          botResponse: botResponseLog || 'Resumen de carrito enviado.',
-          status: status,
-          timestamp: admin.firestore.FieldValue.serverTimestamp()
-      });
-      console.log("💾 Conversación guardada en Firestore.");
-
-  } catch (error) {
-      console.error('❌ ERROR en la lógica del bot:', error);
-      await sendWhatsAppMessage(from, "Lo siento, estoy teniendo problemas técnicos.");
-  }
-  
-  res.sendStatus(200);
-});
-
-app.listen(PORT, () => {
-    console.log(`Servidor escuchando en el puerto ${PORT}`);
-});
+// --- INICIAR SERVIDOR ---
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`🚀 Servidor escuchando en el puerto ${PORT}`);
+  });
+}
