@@ -117,7 +117,7 @@ async function splitTextIntoItemsAI(userText) {
     `;
     try {
         const response = await axios.post('https://openrouter.ai/api/v1/chat/completions', {
-            model: 'nousresearch/nous-hermes-2-mixtral-8x7b-dpo:free',
+            model: 'mistralai/mistral-7b-instruct:free',
             messages: [{ role: 'system', content: prompt }]
         }, { headers: { 'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}` } });
         let content = response.data.choices[0].message.content;
