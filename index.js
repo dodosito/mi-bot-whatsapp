@@ -1,184 +1,243 @@
 const express = require('express');
 const axios = require('axios');
+const admin = require('firebase-admin');
 const app = express();
-app.use(express.json()); // Para que el bot entienda los mensajes que le llegan
+app.use(express.json());
 
-// --- RUTA PARA EL CHEQUEO DE SALUD DE RAILWAY ---
-// Esta ruta es solo para Railway. Siempre responde 200 OK para que Railway sepa que el bot está vivo.
-app.get('/health', (req, res) => {
+// --- CONFIGURACIÓN DE FIREBASE/FIRESTORE ---
+const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY);
+if (!admin.apps.length) {
+  admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount)
+  });
+}
+const db = admin.firestore();
+
+// --- FUNCIONES DE UTILIDAD ---
+async function getUserState(phoneNumber) {
+  const userStateRef = db.collection('user_states').doc(phoneNumber);
+  const doc = await userStateRef.get();
+  return doc.exists ? doc.data() : { status: 'IDLE', data: {} };
+}
+
+async function setUserState(phoneNumber, status, data = {}) {
+  const userStateRef = db.collection('user_states').doc(phoneNumber);
+  await userStateRef.set({ status, data, lastUpdated: admin.firestore.FieldValue.serverTimestamp() });
+}
+
+async function sendWhatsAppMessage(to, messageBody, messageType = 'text', interactivePayload = null) {
+  const payload = {
+    messaging_product: 'whatsapp',
+    to: to,
+    type: messageType,
+  };
+  if (messageType === 'text') {
+    payload.text = { body: messageBody, preview_url: false };
+  } else if (messageType === 'interactive' && interactivePayload) {
+    payload.interactive = interactivePayload;
+  }
+  try {
+    await axios.post(
+      `https://graph.facebook.com/v19.0/${process.env.PHONE_NUMBER_ID}/messages`,
+      payload,
+      { headers: { 'Authorization': `Bearer ${process.env.WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' } }
+    );
+    console.log(`✅ Mensaje tipo '${messageType}' enviado a ${to}.`);
+  } catch (error) {
+    console.error('❌ ERROR al enviar mensaje a WhatsApp:', error.response ? JSON.stringify(error.response.data, null, 2) : error.message);
+  }
+}
+
+function normalizeText(text) {
+  if (!text) return '';
+  return text.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
+}
+
+function levenshteinDistance(a, b) {
+  const matrix = Array(b.length + 1).fill(null).map(() => Array(a.length + 1).fill(null));
+  for (let i = 0; i <= a.length; i++) matrix[0][i] = i;
+  for (let j = 0; j <= b.length; j++) matrix[j][0] = j;
+  for (let j = 1; j <= b.length; j++) {
+    for (let i = 1; i <= a.length; i++) {
+      const indicator = a[i - 1] === b[j - 1] ? 0 : 1;
+      matrix[j][i] = Math.min(
+        matrix[j][i - 1] + 1,
+        matrix[j - 1][i] + 1,
+        matrix[j - 1][i - 1] + indicator,
+      );
+    }
+  }
+  return matrix[b.length][a.length];
+}
+
+function splitOrderText(input) {
+  const delimitadores = [' y ', ',', ';', '|'];
+  let texto = input;
+  for (const delim of delimitadores) {
+    texto = texto.split(delim).join('|');
+  }
+  return texto.split('|').map(i => i.trim()).filter(i => i.length > 0);
+}
+
+async function findProductsInCatalog(text) {
+  const normalizedUserText = normalizeText(text);
+  const searchKeywords = normalizedUserText.split(' ').filter(word => word.length > 2);
+  if (searchKeywords.length === 0) return [];
+
+  const productsRef = db.collection('products');
+  const snapshot = await productsRef.get();
+  if (snapshot.empty) return [];
+
+  let maxScore = 0;
+  const scoredProducts = [];
+
+  snapshot.forEach(doc => {
+    const product = doc.data();
+    let score = 0;
+    const normalizedProductName = normalizeText(product.productName);
+
+    searchKeywords.forEach(keyword => {
+      if (product.searchTerms.map(term => normalizeText(term)).includes(keyword)) {
+        score += 3;
+      }
+      if (normalizedProductName.includes(keyword)) {
+        score += 1;
+      }
+      product.searchTerms.forEach(term => {
+        const distance = levenshteinDistance(keyword, normalizeText(term));
+        if (distance > 0 && distance <= 2) {
+          score += 2;
+        }
+      });
+    });
+
+    if (score > 0) {
+      if (score > maxScore) maxScore = score;
+      scoredProducts.push({ ...product, score });
+    }
+  });
+
+  if (maxScore === 0) return [];
+  return scoredProducts.filter(p => p.score >= maxScore);
+}
+
+async function showCartSummary(from, data) {
+  let summary = "*Este es tu pedido hasta ahora:*\n\n";
+  if (data.orderItems && data.orderItems.length > 0) {
+    data.orderItems.forEach(item => {
+      summary += `• ${item.quantity} ${item.unit} de ${item.productName}\n`;
+    });
+  } else {
+    summary = "Tu carrito está vacío.\n\n";
+  }
+  summary += "\n¿Qué deseas hacer?";
+  const cartMenu = {
+    type: 'button',
+    body: { text: summary },
+    action: {
+      buttons: [
+        { type: 'reply', reply: { id: 'add_more_products', title: '➕ Añadir más' } },
+        { type: 'reply', reply: { id: 'finish_order', title: '✅ Finalizar Pedido' } }
+      ]
+    }
+  };
+  await sendWhatsAppMessage(from, '', 'interactive', cartMenu);
+  await setUserState(from, 'AWAITING_ORDER_ACTION', data);
+}
+
+async function processNextPendingItem(from, data) {
+  if (!data.pendingItemsList || data.pendingItemsList.length === 0) {
+    await showCartSummary(from, data);
+    return;
+  }
+  const nextText = data.pendingItemsList.shift();
+  await setUserState(from, 'AWAITING_ORDER_TEXT', data);
+  await handleItemParsing(from, nextText, data);
+}
+
+async function handleItemParsing(from, text, data) {
+  const matchedProducts = await findProductsInCatalog(text);
+  if (matchedProducts.length === 0) {
+    await sendWhatsAppMessage(from, `❌ No encontré ningún producto que coincida con: "${text}". Intenta describirlo de otra forma.`);
+    await processNextPendingItem(from, data);
+    return;
+  }
+
+  const product = matchedProducts[0];
+  data.currentItem = { productId: product.id, productName: product.productName };
+  await setUserState(from, 'AWAITING_QUANTITY', data);
+  await sendWhatsAppMessage(from, `📦 ¿Cuántas unidades de *${product.productName}* deseas pedir?`);
+}
+
+app.post('/webhook', async (req, res) => {
+  const entry = req.body.entry?.[0];
+  const changes = entry?.changes?.[0];
+  const message = changes?.value?.messages?.[0];
+  const from = message?.from;
+  const text = message?.text?.body;
+  if (!from || !text) return res.sendStatus(200);
+
+  const state = await getUserState(from);
+  const data = state.data || {};
+
+  switch (state.status) {
+    case 'AWAITING_ORDER_TEXT': {
+      if (!data.pendingItemsList) {
+        data.pendingItemsList = splitOrderText(text);
+      }
+      await processNextPendingItem(from, data);
+      break;
+    }
+    case 'AWAITING_QUANTITY': {
+      const quantity = parseFloat(text);
+      if (isNaN(quantity) || quantity <= 0) {
+        await sendWhatsAppMessage(from, '❌ Por favor ingresa una cantidad válida.');
+        return res.sendStatus(200);
+      }
+      data.currentItem.quantity = quantity;
+      await setUserState(from, 'AWAITING_UOM', data);
+      await sendWhatsAppMessage(from, `📏 ¿Qué unidad deseas usar para *${data.currentItem.productName}*? Por ejemplo: cajas, botellas, litros...`);
+      break;
+    }
+    case 'AWAITING_UOM': {
+      const unit = normalizeText(text);
+      data.currentItem.unit = unit;
+      data.orderItems = data.orderItems || [];
+      data.orderItems.push(data.currentItem);
+      delete data.currentItem;
+      await setUserState(from, 'ORDER_IN_PROGRESS', data);
+      await processNextPendingItem(from, data);
+      break;
+    }
+    case 'AWAITING_ORDER_ACTION': {
+      const input = normalizeText(text);
+      if (input.includes('añadir')) {
+        await setUserState(from, 'AWAITING_ORDER_TEXT', data);
+        await sendWhatsAppMessage(from, '🛒 Ingresa el siguiente producto que deseas añadir.');
+      } else if (input.includes('finalizar')) {
+        await sendWhatsAppMessage(from, '✅ ¡Gracias por tu pedido! Pronto lo procesaremos.');
+        await setUserState(from, 'IDLE');
+      } else {
+        await sendWhatsAppMessage(from, '❌ Opción no reconocida. Elige una opción del menú.');
+      }
+      break;
+    }
+    default: {
+      data.pendingItemsList = splitOrderText(text);
+      await setUserState(from, 'AWAITING_ORDER_TEXT', data);
+      await processNextPendingItem(from, data);
+      break;
+    }
+  }
+
   res.sendStatus(200);
 });
 
-// --- TUS SECRETOS (VARIABLES DE ENTORNO) ---
-// El bot leerá estas claves de Railway (Variables de Entorno).
-// NO debes cambiar estas líneas en el código.
-const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
-const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
-const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
-const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
-const PORT = process.env.PORT || 3000; // Railway expone el puerto 3000
-
-// --- RUTA PARA LA VERIFICACIÓN DE META (Webhook GET) ---
-// Meta (WhatsApp) usa esto para asegurarse de que tu bot está vivo y escuchando.
-app.get('/webhook', (req, res) => {
-  const mode = req.query['hub.mode'];
-  const token = req.query['hub.verify_token'];
-  const challenge = req.query['hub.challenge'];
-
-  if (mode && token) {
-    if (mode === 'subscribe' && token === VERIFY_TOKEN) {
-      console.log('WEBHOOK_VERIFICADO ✅');
-      res.status(200).send(challenge); // DEBES DEVOLVER EL "challenge" DE META
-    } else {
-      // Si el token de verificación no coincide
-      console.log('Error de verificación: Token no coincide.');
-      res.sendStatus(403); // Forbidden
-    }
-  } else {
-    // Si faltan parámetros en la solicitud de verificación (Esto es lo que Railway estaba recibiendo antes)
-    console.log('Error de verificación: Faltan parámetros en la URL.');
-    res.sendStatus(400); // Bad Request
-  }
+app.get('/health', (req, res) => {
+  res.send('Bot activo');
 });
 
-// --- RUTA PARA RECIBIR MENSAJES DE WHATSAPP (Webhook POST) ---
-// Aquí es donde tu bot recibe los mensajes de texto que la gente le envía.
-app.post('/webhook', async (req, res) => {
-  const body = req.body;
-  console.log('📥 WEBHOOK RECIBIDO:', JSON.stringify(body, null, 2));
-
-  // Aseguramos que es un mensaje de WhatsApp y que contiene un mensaje de texto
-  if (body.object === 'whatsapp_business_account' &&
-      body.entry &&
-      body.entry[0].changes &&
-      body.entry[0].changes[0].value.messages &&
-      body.entry[0].changes[0].value.messages[0]) {
-
-    const message = body.entry[0].changes[0].value.messages[0];
-    const from = message.from; // Número de teléfono que envió el mensaje
-    const messageId = message.id; // ID del mensaje para marcarlo como leído
-    const messageType = message.type; // Tipo de mensaje (text, image, etc.)
-
-    // Marcar el mensaje como leído en WhatsApp (opcional, pero buena práctica)
-    try {
-        await axios.post(
-            `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`,
-            {
-                messaging_product: 'whatsapp',
-                status: 'read',
-                message_id: messageId
-            },
-            {
-                headers: {
-                    'Authorization': `Bearer ${WHATSAPP_TOKEN}`,
-                    'Content-Type': 'application/json',
-                }
-            }
-        );
-        console.log(`Mensaje ${messageId} marcado como leído.`);
-    } catch (readError) {
-        console.error('Error al marcar mensaje como leído:', readError.response ? JSON.stringify(readError.response.data, null, 2) : readError.message);
-    }
-
-    if (messageType === 'text') {
-      const userMessage = message.text.body;
-      console.log(`💬 Mensaje de ${from}: ${userMessage}`);
-
-      try {
-        // Paso 1: Enviar el mensaje del usuario a OpenRouter para obtener una respuesta del bot
-        const openRouterResponse = await axios.post(
-          'https://openrouter.ai/api/v1/chat/completions',
-          {
-            model: 'openai/gpt-3.5-turbo', // Usando el modelo original que tenías
-            messages: [{ role: 'user', content: userMessage }],
-          },
-          {
-            headers: {
-              'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
-              'Content-Type': 'application/json',
-            },
-            timeout: 15000 // Aumenta el tiempo de espera por si OpenRouter tarda un poco
-          }
-        );
-
-        const botResponse = openRouterResponse.data.choices[0].message.content;
-        console.log('🤖 Respuesta del bot:', botResponse);
-
-        // Paso 2: Enviar la respuesta del bot de vuelta al usuario en WhatsApp
-        await axios.post(
-          `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`, // Asegúrate de que la versión de la API sea correcta (v19.0)
-          {
-            messaging_product: 'whatsapp',
-            to: from,
-            type: 'text',
-            text: { body: botResponse },
-          },
-          {
-            headers: {
-              'Authorization': `Bearer ${WHATSAPP_TOKEN}`,
-              'Content-Type': 'application/json',
-            },
-          }
-        );
-        console.log('✅ Mensaje enviado a WhatsApp.');
-
-      } catch (error) {
-        console.error('❌ ERROR al procesar mensaje o enviar respuesta:', error.response ? JSON.stringify(error.response.data, null, 2) : error.message);
-        // Si hay un error, puedes intentar enviar un mensaje de error al usuario de WhatsApp
-        try {
-          await axios.post(
-            `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`,
-            {
-              messaging_product: 'whatsapp',
-              to: from,
-              type: 'text',
-              text: { body: 'Lo siento, no pude procesar tu solicitud en este momento. Intenta de nuevo más tarde.' },
-            },
-            {
-              headers: {
-                'Authorization': `Bearer ${WHATSAPP_TOKEN}`,
-                'Content-Type': 'application/json',
-              },
-            }
-          );
-        } catch (sendError) {
-          console.error('❌ ERROR al enviar mensaje de error al usuario:', sendError.response ? JSON.stringify(sendError.response.data, null, 2) : sendError.message);
-        }
-      }
-    } else {
-      console.log(`Mensaje no es de texto. Tipo: ${messageType}`);
-      // Opcional: Notificar al usuario que solo se procesan mensajes de texto
-      try {
-          await axios.post(
-            `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`,
-            {
-              messaging_product: 'whatsapp',
-              to: from,
-              type: 'text',
-              text: { body: 'Lo siento, solo puedo responder a mensajes de texto por ahora.' },
-            },
-            {
-              headers: {
-                'Authorization': `Bearer ${WHATSAPP_TOKEN}`,
-                'Content-Type': 'application/json',
-              },
-            }
-          );
-        } catch (sendError) {
-          console.error('❌ ERROR al enviar mensaje de solo texto:', sendError.response ? JSON.stringify(sendError.response.data, null, 2) : sendError.message);
-        }
-    }
-  } else {
-    // Esto captura webhooks que no son de WhatsApp o no tienen el formato esperado
-    console.log('El webhook recibido no contiene un mensaje de WhatsApp válido o no es de una cuenta de negocio.');
-  }
-  res.sendStatus(200); // MUY IMPORTANTE: Siempre responde 200 OK a WhatsApp para que no reintente el mismo mensaje.
-});
-
-// --- INSTRUCCIÓN FINAL PARA QUE EL BOT SE QUEDE ENCENDIDO ---
-// Esto es lo que mantiene tu aplicación Express escuchando en el puerto
-// y evita que Railway la apague.
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Servidor escuchando en http://localhost:${PORT}`);
-  console.log('¡El bot está vivo y esperando mensajes! 🚀');
+  console.log(`🚀 Servidor escuchando en el puerto ${PORT}`);
 });
