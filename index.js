@@ -13,7 +13,7 @@ if (!admin.apps.length) {
 }
 const db = admin.firestore();
 
-// --- FUNCIONES DE UTILIDAD ---
+// --- FUNCIONES DE UTILIDADd ---
 async function getUserState(phoneNumber) {
     const userStateRef = db.collection('user_states').doc(phoneNumber);
     const doc = await userStateRef.get();
