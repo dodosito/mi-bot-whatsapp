@@ -73,7 +73,7 @@ async function extractOrderDetailsWithAI(userText, candidateProducts) {
         const response = await axios.post(
             'https://openrouter.ai/api/v1/chat/completions',
             {
-                model: 'mistralai/mistral-7b-instruct:free', // <-- ¡AQUÍ ESTÁ EL CAMBIO!
+                model: 'mistralai/mistral-7b-instruct:free',
                 messages: [{ role: 'system', content: prompt }]
             },
             { headers: { 'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}` } }
@@ -96,7 +96,6 @@ async function extractOrderDetailsWithAI(userText, candidateProducts) {
         return null;
     }
 }
-
 
 async function findProductsInCatalog(text) {
     const searchKeywords = text.toLowerCase().split(' ').filter(word => word.length > 2);
@@ -197,20 +196,9 @@ app.post('/webhook', async (req, res) => {
                   await sendWhatsAppMessage(from, "Lo siento, no encontré productos que coincidan con tu búsqueda.");
                   break;
               }
-              const extractedDetails = await extractOrderDetailsWithAI(originalText, candidateProducts);
-              if (extractedDetails && extractedDetails.sku && extractedDetails.quantity && extractedDetails.unit) {
-                  const productDoc = await db.collection('products').doc(extractedDetails.sku).get();
-                  if (productDoc.exists) {
-                      const newOrderItem = { ...productDoc.data(), quantity: extractedDetails.quantity, unit: extractedDetails.unit };
-                      if (!data.orderItems) data.orderItems = [];
-                      data.orderItems.push(newOrderItem);
-                      await showCartSummary(from, data);
-                  }
-              } else if (candidateProducts.length === 1) {
-                  data.pendingProduct = candidateProducts[0];
-                  await sendWhatsAppMessage(from, `Encontré "${data.pendingProduct.productName}". ¿Qué cantidad necesitas?`);
-                  await setUserState(from, 'AWAITING_QUANTITY', data);
-              } else {
+
+              if (candidateProducts.length > 1) {
+                  console.log("Ambigüedad detectada. Mostrando menú de desambiguación.");
                   let clarificationMenu;
                   const validProducts = candidateProducts.filter(p => p.shortName && p.sku);
                   if (validProducts.length > 0 && validProducts.length <= 3) {
@@ -223,6 +211,21 @@ app.post('/webhook', async (req, res) => {
                   }
                   await sendWhatsAppMessage(from, '', 'interactive', clarificationMenu);
                   await setUserState(from, 'AWAITING_CLARIFICATION', data);
+              } else if (candidateProducts.length === 1) {
+                  const extractedDetails = await extractOrderDetailsWithAI(originalText, candidateProducts);
+                  if (extractedDetails && extractedDetails.quantity && extractedDetails.unit) {
+                      console.log("IA extrajo todo. Añadiendo al carrito.");
+                      const product = candidateProducts[0];
+                      const newOrderItem = { ...product, quantity: extractedDetails.quantity, unit: extractedDetails.unit };
+                      if (!data.orderItems) data.orderItems = [];
+                      data.orderItems.push(newOrderItem);
+                      await showCartSummary(from, data);
+                  } else {
+                      console.log("IA no pudo extraer todo. Pasando a flujo manual.");
+                      data.pendingProduct = candidateProducts[0];
+                      await sendWhatsAppMessage(from, `Encontré "${data.pendingProduct.productName}". ¿Qué cantidad necesitas?`);
+                      await setUserState(from, 'AWAITING_QUANTITY', data);
+                  }
               }
               break;
           
