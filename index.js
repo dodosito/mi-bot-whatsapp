@@ -48,32 +48,82 @@ async function sendWhatsAppMessage(to, messageBody, messageType = 'text', intera
     }
 }
 
+function normalizeText(text) {
+    if (!text) return '';
+    return text.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+}
+
+function levenshteinDistance(a, b) {
+    const matrix = Array(b.length + 1).fill(null).map(() => Array(a.length + 1).fill(null));
+    for (let i = 0; i <= a.length; i += 1) matrix[0][i] = i;
+    for (let j = 0; j <= b.length; j += 1) matrix[j][0] = j;
+    for (let j = 1; j <= b.length; j += 1) {
+        for (let i = 1; i <= a.length; i += 1) {
+            const indicator = a[i - 1] === b[j - 1] ? 0 : 1;
+            matrix[j][i] = Math.min(
+                matrix[j][i - 1] + 1,
+                matrix[j - 1][i] + 1,
+                matrix[j - 1][i - 1] + indicator,
+            );
+        }
+    }
+    return matrix[b.length][a.length];
+}
+
 async function findProductsInCatalog(text) {
-    const searchKeywords = text.toLowerCase().split(' ').filter(word => word.length > 2);
+    const normalizedUserText = normalizeText(text);
+    const searchKeywords = normalizedUserText.split(' ').filter(word => word.length > 2);
     if (searchKeywords.length === 0) return [];
+
     const productsRef = db.collection('products');
-    const snapshot = await productsRef.where('searchTerms', 'array-contains-any', searchKeywords).get();
+    const snapshot = await productsRef.get();
     if (snapshot.empty) return [];
+
     let maxScore = 0;
-    const scoredProducts = snapshot.docs.map(doc => {
+    const scoredProducts = [];
+
+    snapshot.forEach(doc => {
         const product = doc.data();
         let score = 0;
+        const normalizedProductName = normalizeText(product.productName);
+
         searchKeywords.forEach(keyword => {
-            if (product.searchTerms.includes(keyword)) score++;
+            if (product.searchTerms.map(term => normalizeText(term)).includes(keyword)) {
+                score += 3;
+            }
+            if (normalizedProductName.includes(keyword)) {
+                score += 1;
+            }
+            product.searchTerms.forEach(term => {
+                const distance = levenshteinDistance(keyword, normalizeText(term));
+                if (distance > 0 && distance <= 2) {
+                    score += 2;
+                }
+            });
         });
-        if (score > maxScore) maxScore = score;
-        return { ...product, score };
+
+        if (score > 0) {
+            if (score > maxScore) maxScore = score;
+            scoredProducts.push({ ...product, score });
+        }
     });
-    const bestMatches = scoredProducts.filter(p => p.score === maxScore);
-    console.log(`✨ Mejores coincidencias encontradas:`, bestMatches.map(p => p.productName));
+
+    if (maxScore === 0) return [];
+    
+    const bestMatches = scoredProducts.filter(p => p.score >= maxScore);
+    console.log(`✨ Mejores coincidencias encontradas (score >= ${maxScore}):`, bestMatches.map(p => p.productName));
     return bestMatches;
 }
 
 async function showCartSummary(from, data) {
     let summary = "*Este es tu pedido hasta ahora:*\n\n";
-    data.orderItems.forEach(item => {
-        summary += `• ${item.quantity} ${item.unit} de ${item.productName}\n`;
-    });
+    if (data.orderItems && data.orderItems.length > 0) {
+        data.orderItems.forEach(item => {
+            summary += `• ${item.quantity} ${item.unit} de ${item.productName}\n`;
+        });
+    } else {
+        summary = "Tu carrito está vacío.\n\n";
+    }
     summary += "\n¿Qué deseas hacer?";
     const cartMenu = { type: 'button', body: { text: summary }, action: { buttons: [{ type: 'reply', reply: { id: 'add_more_products', title: '➕ Añadir más' } }, { type: 'reply', reply: { id: 'finish_order', title: '✅ Finalizar Pedido' } }] } };
     await sendWhatsAppMessage(from, '', 'interactive', cartMenu);
@@ -151,6 +201,9 @@ app.post('/webhook', async (req, res) => {
                         clarificationMenu = { type: 'button', body: { text: `Para "${originalText}", ¿a cuál de estos te refieres?` }, action: { buttons: validProducts.map(p => ({ type: 'reply', reply: { id: p.sku, title: p.shortName } })) } };
                     } else if (validProducts.length > 3) {
                         clarificationMenu = { type: 'list', body: { text: `Para "${originalText}", ¿a cuál de estos te refieres?` }, action: { button: 'Ver opciones', sections: [{ title: 'Elige una presentación', rows: validProducts.slice(0, 10).map(p => ({ id: p.sku, title: p.shortName, description: p.productName })) }] } };
+                    } else {
+                       await sendWhatsAppMessage(from, "Lo siento, encontré coincidencias pero no pude generar las opciones.");
+                       break;
                     }
                     data.originalTextForClarification = originalText;
                     await sendWhatsAppMessage(from, '', 'interactive', clarificationMenu);
@@ -214,20 +267,16 @@ app.post('/webhook', async (req, res) => {
                 }
                 break;
 
-            // --- ¡ESTE CASO HA SIDO MEJORADO! ---
             case 'AWAITING_QUANTITY':
-                const product = data.pendingProduct;
                 const text = originalText.toLowerCase();
-
                 const quantityMatch = text.match(/(\d+)(?!ml)/);
                 const quantity = quantityMatch ? parseInt(quantityMatch[0]) : null;
-
                 if (!quantity) {
                     botResponseLog = "Por favor, ingresa una cantidad numérica válida.";
                     await sendWhatsAppMessage(from, botResponseLog);
                     break;
                 }
-
+                const product = data.pendingProduct;
                 let unit = null;
                 if (product.availableUnits) {
                     for (const u of product.availableUnits) {
@@ -238,7 +287,6 @@ app.post('/webhook', async (req, res) => {
                         }
                     }
                 }
-
                 if (unit) {
                     const newOrderItem = { ...product, quantity, unit };
                     if (!data.orderItems) data.orderItems = [];
