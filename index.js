@@ -25,6 +25,7 @@ async function setUserState(phoneNumber, status, data = {}) {
     await userStateRef.set({ status, data, lastUpdated: admin.firestore.FieldValue.serverTimestamp() });
 }
 
+// --- NUEVA FUNCIÓN PARA GESTIONAR USUARIOS ---
 async function getOrCreateUser(phoneNumber) {
     const userRef = db.collection('users').doc(phoneNumber);
     const doc = await userRef.get();
@@ -34,7 +35,8 @@ async function getOrCreateUser(phoneNumber) {
             firstContactAt: admin.firestore.FieldValue.serverTimestamp(),
             lastContactAt: admin.firestore.FieldValue.serverTimestamp(),
             name: `Cliente ${phoneNumber}`,
-            sapCustomerId: "1000234", // Dato de ejemplo
+            // --- CAMPOS DE EJEMPLO PARA SAP ---
+            sapCustomerId: "1000234", 
             salesOrganization: "1710",
             distributionChannel: "10",
             division: "00"
@@ -46,6 +48,7 @@ async function getOrCreateUser(phoneNumber) {
         return doc.data();
     }
 }
+
 
 async function sendWhatsAppMessage(to, messageBody, messageType = 'text', interactivePayload = null) {
     const payload = {
@@ -70,6 +73,7 @@ async function sendWhatsAppMessage(to, messageBody, messageType = 'text', intera
     }
 }
 
+// ... (El resto de las funciones: normalizeText, levenshteinDistance, findProductsInCatalog, etc. no cambian)
 function normalizeText(text) {
     if (!text) return '';
     return text.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
@@ -172,7 +176,8 @@ app.post('/webhook', async (req, res) => {
   } else { return res.sendStatus(200); }
   
   try {
-      const user = await getOrCreateUser(from); // Obtenemos/creamos al usuario al inicio
+      // --- ÚNICO CAMBIO EN EL FLUJO ---
+      const user = await getOrCreateUser(from); // Obtenemos o creamos al usuario al inicio
       const currentUserState = await getUserState(from);
       let { status, data = {} } = currentUserState;
 
@@ -336,44 +341,23 @@ app.post('/webhook', async (req, res) => {
                     const confirmMenu = {
                         type: 'button',
                         body: { text: '¿Estás seguro de que deseas finalizar tu pedido?' },
-                        action: { buttons: [ { type: 'reply', reply: { id: 'finish_order_confirm_yes', title: '✅ Sí, finalizar' } }, { type: 'reply', reply: { id: 'finish_order_confirm_no', title: '❌ No, volver' } } ] }
+                        action: {
+                            buttons: [
+                                { type: 'reply', reply: { id: 'finish_order_confirm_yes', title: '✅ Sí' } },
+                                { type: 'reply', reply: { id: 'finish_order_confirm_no', title: '❌ No' } }
+                            ]
+                        }
                     };
                     await sendWhatsAppMessage(from, '', 'interactive', confirmMenu);
                     await setUserState(from, 'AWAITING_FINAL_CONFIRMATION', data);
                 }
                 break;
-            
+
             case 'AWAITING_FINAL_CONFIRMATION':
                 if (userMessage === 'finish_order_confirm_yes') {
                     const orderNumber = `PEDIDO-${Date.now()}`;
                     botResponseLog = `¡Pedido confirmado! ✅\n\nTu número de orden es: *${orderNumber}*`;
-                    
-                    const sapPayload = {
-                        header: {
-                            SalesOrderType: "OR",
-                            SalesOrganization: user.salesOrganization,
-                            DistributionChannel: user.distributionChannel,
-                            Division: user.division,
-                            SoldToParty: user.sapCustomerId,
-                        },
-                        items: data.orderItems.map(item => ({
-                            Material: item.sku,
-                            RequestedQuantity: item.quantity,
-                            RequestedQuantityUnit: item.sapUnitMapping ? (item.sapUnitMapping[item.unit.toLowerCase()] || 'EA') : 'EA',
-                            Plant: item.defaultPlant || '1710'
-                        }))
-                    };
-                    
-                    const orderData = {
-                        orderNumber: orderNumber,
-                        status: 'CONFIRMED',
-                        orderDate: admin.firestore.FieldValue.serverTimestamp(),
-                        items: data.orderItems,
-                        sapPayload: sapPayload
-                    };
-
-                    await db.collection('users').doc(from).collection('orders').doc(orderNumber).set(orderData);
-                    
+                    await db.collection('orders').add({ orderNumber, phoneNumber: from, status: 'CONFIRMED', orderDate: admin.firestore.FieldValue.serverTimestamp(), items: data.orderItems });
                     await sendWhatsAppMessage(from, botResponseLog);
                     await setUserState(from, 'IDLE', {});
                 } else {
