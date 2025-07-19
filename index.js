@@ -264,6 +264,39 @@ app.post('/webhook', async (req, res) => {
   const from = message.from;
   let userMessage, originalText = '', botResponseLog = '';
 
+  // 🛒 Si viene como selección desde catálogo (WhatsApp API)
+if (message.type === 'order' && message.order?.product_items) {
+  for (const item of message.order.product_items) {
+    const productId = item.product_retailer_id;
+    const quantity = item.quantity || 1;
+
+    const snapshot = await db.collection('products')
+      .where('sku', '==', productId)
+      .limit(1).get();
+
+    if (!snapshot.empty) {
+      const pd = snapshot.docs[0].data();
+      const unit = pd.defaultUnit || 'unidad';
+      const description = pd.productName || pd.name;
+
+      const orderItem = { sku: productId, productName: description, quantity, unit };
+
+      if (!data.orderItems) data.orderItems = [];
+      data.orderItems.push(orderItem);
+      botResponseLog = `✅ Agregado al carrito: ${quantity} ${unit} de ${description}`;
+    } else {
+      botResponseLog = `⚠️ SKU no encontrado: ${productId}`;
+    }
+    await sendWhatsAppMessage(from, botResponseLog);
+  }
+
+  await showCartSummary(from, data, user);
+  await setUserState(from, 'AWAITING_ORDER_ACTION', data);
+  return res.sendStatus(200);
+}
+
+
+  
   if (message.type === 'text') {
       userMessage = originalText = message.text.body;
   } else if (message.interactive) {
