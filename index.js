@@ -4,7 +4,7 @@ const admin = require('firebase-admin');
 const app = express();
 app.use(express.json());
 
-// --- CONFIGURACIÓN DE FIREBASE/FIRESTORE ---
+// --- CONFIGURACIÓNn DE FIREBASE/FIRESTORE ---
 const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY);
 if (!admin.apps.length) {
   admin.initializeApp({
@@ -131,6 +131,10 @@ async function splitTextIntoItemsAI(userText) {
       Corrige errores de tipeo obvios. No añadas palabras que no estén en el texto original, como cantidades ('un', 'una').
       Texto del Cliente: "${userText}"
       Responde únicamente con un array de strings en formato JSON. No incluyas nada más en tu respuesta.
+      Ejemplo:
+      Texto del Cliente: "quiero 20 cajas de pilsen 630ml y 10 paquetes de coca-cola, tambien una servesa cristall"
+      Tu Respuesta:
+      ["20 cajas de pilsen 630ml", "10 paquetes de coca-cola", "cerveza cristal"]
     `;
     try {
         const response = await axios.post('https://openrouter.ai/api/v1/chat/completions', {
@@ -259,55 +263,12 @@ app.post('/webhook', async (req, res) => {
   const message = req.body.entry[0].changes[0].value.messages[0];
   const from = message.from;
   let userMessage, originalText = '', botResponseLog = '';
-  
-  // --- ¡NUEVA LÓGICA PARA MANEJAR PEDIDOS DEL CATÁLOGO! ---
-  if (message.type === 'order') {
-      try {
-          console.log("🛒 Pedido recibido desde el Catálogo de WhatsApp.");
-          const user = await getOrCreateUser(from);
-          const { status, data } = await getUserState(from); // Obtenemos el estado actual
 
-          if (!data.orderItems) data.orderItems = [];
-          
-          const productItems = message.order.product_items;
-          const productSkus = productItems.map(item => item.product_retailer_id);
-          
-          const productsRef = db.collection('products');
-          const snapshot = await productsRef.where('sku', 'in', productSkus).get();
-          const productsData = {};
-          snapshot.forEach(doc => {
-              productsData[doc.data().sku] = doc.data();
-          });
-
-          let itemsAddedCount = 0;
-          for (const item of productItems) {
-              const product = productsData[item.product_retailer_id];
-              if (product) {
-                  data.orderItems.push({
-                      ...product,
-                      quantity: parseInt(item.quantity),
-                      unit: product.availableUnits[0] || 'unidad'
-                  });
-                  itemsAddedCount++;
-              }
-          }
-          await sendWhatsAppMessage(from, `He añadido ${itemsAddedCount} producto(s) de tu selección del catálogo al carrito.`);
-          await showCartSummary(from, data, user);
-      } catch (error) {
-          console.error('❌ ERROR procesando pedido del catálogo:', error);
-          await sendWhatsAppMessage(from, "Lo siento, hubo un problema al procesar tu pedido del catálogo.");
-      }
-      return res.sendStatus(200);
-  }
-
-  // --- Lógica existente para texto y botones ---
   if (message.type === 'text') {
       userMessage = originalText = message.text.body;
   } else if (message.interactive) {
       userMessage = originalText = message.interactive[message.interactive.type].id;
-  } else { 
-      return res.sendStatus(200); 
-  }
+  } else { return res.sendStatus(200); }
   
   try {
       const user = await getOrCreateUser(from);
@@ -324,7 +285,9 @@ app.post('/webhook', async (req, res) => {
       }
 
       if (userMessage.toLowerCase().trim() === 'resetear') {
-          await db.collection('users').doc(from).collection('sessions').doc(data.sessionId).update({ finalStatus: 'reset' });
+          await db.collection('users').doc(from).collection('sessions').doc(data.sessionId).update({
+              finalStatus: 'reset'
+          });
           await setUserState(from, 'IDLE', {});
           await sendWhatsAppMessage(from, 'Estado reseteado. ✅');
           botResponseLog = 'Estado reseteado.';
@@ -472,6 +435,7 @@ app.post('/webhook', async (req, res) => {
                 if (userMessage === 'finish_order_confirm_yes') {
                     const orderNumber = `PEDIDO-${Date.now()}`;
                     botResponseLog = `¡Pedido confirmado! ✅\n\nTu número de orden es: *${orderNumber}*`;
+                    
                     const sapPayload = {
                         header: {
                             SalesOrderType: "OR", SalesOrganization: user.salesOrganization,
@@ -491,6 +455,7 @@ app.post('/webhook', async (req, res) => {
                     };
                     await db.collection('users').doc(from).collection('orders').doc(orderNumber).set(orderData);
                     await sendWhatsAppMessage(from, botResponseLog);
+                    
                     const sessionRef = db.collection('users').doc(from).collection('sessions').doc(data.sessionId);
                     await sessionRef.update({ 
                         endTime: admin.firestore.FieldValue.serverTimestamp(),
@@ -514,7 +479,7 @@ app.post('/webhook', async (req, res) => {
           const sessionRef = db.collection('users').doc(from).collection('sessions').doc(data.sessionId);
           const turnData = {
               userMessage: originalText,
-              botResponse: botResponseLog || 'Resumen de carrito/menú enviado.',
+              botResponse: botResponseLog || 'Resumen/menú enviado.',
               status: status,
               timestamp: new Date()
           };
