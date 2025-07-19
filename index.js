@@ -25,7 +25,6 @@ async function setUserState(phoneNumber, status, data = {}) {
     await userStateRef.set({ status, data, lastUpdated: admin.firestore.FieldValue.serverTimestamp() });
 }
 
-// --- NUEVA FUNCIÓN PARA GESTIONAR USUARIOS ---
 async function getOrCreateUser(phoneNumber) {
     const userRef = db.collection('users').doc(phoneNumber);
     const doc = await userRef.get();
@@ -35,8 +34,7 @@ async function getOrCreateUser(phoneNumber) {
             firstContactAt: admin.firestore.FieldValue.serverTimestamp(),
             lastContactAt: admin.firestore.FieldValue.serverTimestamp(),
             name: `Cliente ${phoneNumber}`,
-            // --- CAMPOS DE EJEMPLO PARA SAP ---
-            sapCustomerId: "1000234", 
+            sapCustomerId: "1000234",
             salesOrganization: "1710",
             distributionChannel: "10",
             division: "00"
@@ -48,7 +46,6 @@ async function getOrCreateUser(phoneNumber) {
         return doc.data();
     }
 }
-
 
 async function sendWhatsAppMessage(to, messageBody, messageType = 'text', interactivePayload = null) {
     const payload = {
@@ -73,7 +70,6 @@ async function sendWhatsAppMessage(to, messageBody, messageType = 'text', intera
     }
 }
 
-// ... (El resto de las funciones: normalizeText, levenshteinDistance, findProductsInCatalog, etc. no cambian)
 function normalizeText(text) {
     if (!text) return '';
     return text.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
@@ -128,7 +124,99 @@ async function findProductsInCatalog(text) {
     return bestMatches;
 }
 
+async function splitTextIntoItemsAI(userText) {
+    console.log("🤖 Usando IA para dividir la lista de productos...");
+    const prompt = `
+      Tu única tarea es analizar el texto de un cliente y separarlo en una lista de productos individuales.
+      Corrige errores de tipeo obvios. No añadas palabras que no estén en el texto original, como cantidades ('un', 'una').
+      Texto del Cliente: "${userText}"
+      Responde únicamente con un array de strings en formato JSON. No incluyas nada más en tu respuesta.
+      Ejemplo:
+      Texto del Cliente: "quiero 20 cajas de pilsen 630ml y 10 paquetes de coca-cola, tambien una servesa cristall"
+      Tu Respuesta:
+      ["20 cajas de pilsen 630ml", "10 paquetes de coca-cola", "cerveza cristal"]
+    `;
+    try {
+        const response = await axios.post('https://openrouter.ai/api/v1/chat/completions', {
+            model: 'mistralai/mistral-7b-instruct:free',
+            messages: [{ role: 'system', content: prompt }]
+        }, { headers: { 'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}` } });
+        let content = response.data.choices[0].message.content;
+        console.log("🧠 Respuesta cruda de la IA (splitter):", content);
+        const jsonMatch = content.match(/\[[\s\S]*\]/);
+        if (!jsonMatch) {
+            console.error("❌ La IA (splitter) no devolvió un JSON array válido.");
+            return [userText];
+        }
+        return JSON.parse(jsonMatch[0]);
+    } catch (error) {
+        console.error("❌ Error en la división con IA:", error.message);
+        return [userText];
+    }
+}
+
+async function processNextItemInQueue(from, data) {
+    console.log(`[COLA]: ${data.itemsQueue ? data.itemsQueue.length : 0} ítems restantes.`);
+    if (!data.itemsQueue || data.itemsQueue.length === 0) {
+        console.log("✅ Cola de ítems vacía. Mostrando resumen final.");
+        await showCartSummary(from, data);
+        return;
+    }
+
+    const nextItemText = data.itemsQueue.shift();
+    console.log(`[COLA]: Procesando siguiente ítem: "${nextItemText}"`);
+    
+    const candidateProducts = await findProductsInCatalog(nextItemText);
+    if (candidateProducts.length === 0) {
+        await sendWhatsAppMessage(from, `No encontré productos para "${nextItemText}". Saltando al siguiente ítem.`);
+        await processNextItemInQueue(from, data);
+    } else if (candidateProducts.length > 1) {
+        if (data.initialItemCount > 0) {
+            const initialMessage = `Identifiqué ${data.initialItemCount} productos. ¡Vamos a completarlos!`;
+            await sendWhatsAppMessage(from, initialMessage);
+            data.initialItemCount = 0;
+        }
+        let clarificationMenu;
+        const validProducts = candidateProducts.filter(p => p.shortName && p.sku);
+        const menuBody = `Para "${nextItemText}", ¿a cuál de estos te refieres?`;
+        if (validProducts.length > 0 && validProducts.length <= 3) {
+            clarificationMenu = { type: 'button', body: { text: menuBody }, action: { buttons: validProducts.map(p => ({ type: 'reply', reply: { id: p.sku, title: p.shortName } })) } };
+        } else {
+            clarificationMenu = { type: 'list', body: { text: menuBody }, action: { button: 'Ver opciones', sections: [{ title: 'Elige una presentación', rows: validProducts.slice(0, 10).map(p => ({ id: p.sku, title: p.shortName, description: p.productName })) }] } };
+        }
+        data.originalTextForClarification = nextItemText;
+        await sendWhatsAppMessage(from, '', 'interactive', clarificationMenu);
+        await setUserState(from, 'AWAITING_CLARIFICATION', data);
+    } else if (candidateProducts.length === 1) {
+        const product = candidateProducts[0];
+        const text = normalizeText(nextItemText);
+        const quantityMatch = text.match(/(\d+)(?!ml)/);
+        const quantity = quantityMatch ? parseInt(quantityMatch[0]) : null;
+        let unit = null;
+        if (product.availableUnits) {
+            for (const u of product.availableUnits) {
+                const unitRegex = new RegExp(`\\b${u.toLowerCase()}s?\\b`);
+                if (text.match(unitRegex)) { unit = u; break; }
+            }
+        }
+        if (quantity && unit) {
+            const newOrderItem = { ...product, quantity, unit };
+            if (!data.orderItems) data.orderItems = [];
+            data.orderItems.push(newOrderItem);
+            await processNextItemInQueue(from, data);
+        } else {
+            data.pendingProduct = product;
+            await sendWhatsAppMessage(from, `Encontré "${product.productName}". ¿Qué cantidad necesitas?`);
+            await setUserState(from, 'AWAITING_QUANTITY', data);
+        }
+    }
+}
+
 async function showCartSummary(from, data) {
+    if (data.itemsQueue && data.itemsQueue.length > 0) {
+        await processNextItemInQueue(from, data);
+        return;
+    }
     let summary = "*Este es tu pedido hasta ahora:*\n\n";
     if (data.orderItems && data.orderItems.length > 0) {
         data.orderItems.forEach(item => {
@@ -138,7 +226,14 @@ async function showCartSummary(from, data) {
         summary = "Tu carrito está vacío.\n\n";
     }
     summary += "\n¿Qué deseas hacer?";
-    const cartMenu = { type: 'button', body: { text: summary }, action: { buttons: [{ type: 'reply', reply: { id: 'add_more_products', title: '➕ Añadir más' } }, { type: 'reply', reply: { id: 'finish_order_start', title: '✅ Finalizar Pedido' } }] } };
+
+    const buttons = [ { type: 'reply', reply: { id: 'add_more_products', title: '➕ Añadir más' } } ];
+    if (data.orderItems && data.orderItems.length > 0) {
+        buttons.push({ type: 'reply', reply: { id: 'delete_item_start', title: '🗑️ Eliminar producto' } });
+    }
+    buttons.push({ type: 'reply', reply: { id: 'finish_order_start', title: '✅ Finalizar Pedido' } });
+    
+    const cartMenu = { type: 'button', body: { text: summary }, action: { buttons } };
     await sendWhatsAppMessage(from, '', 'interactive', cartMenu);
     await setUserState(from, 'AWAITING_ORDER_ACTION', data);
 }
@@ -176,8 +271,7 @@ app.post('/webhook', async (req, res) => {
   } else { return res.sendStatus(200); }
   
   try {
-      // --- ÚNICO CAMBIO EN EL FLUJO ---
-      const user = await getOrCreateUser(from); // Obtenemos o creamos al usuario al inicio
+      const user = await getOrCreateUser(from);
       const currentUserState = await getUserState(from);
       let { status, data = {} } = currentUserState;
 
@@ -202,45 +296,13 @@ app.post('/webhook', async (req, res) => {
                 break;
 
             case 'AWAITING_ORDER_TEXT':
-                const candidateProducts = await findProductsInCatalog(originalText);
-                if (candidateProducts.length === 0) {
-                    await sendWhatsAppMessage(from, "Lo siento, no encontré productos que coincidan con tu búsqueda.");
-                } else if (candidateProducts.length > 1) {
-                    let clarificationMenu;
-                    const validProducts = candidateProducts.filter(p => p.shortName && p.sku);
-                    if (validProducts.length > 0 && validProducts.length <= 3) {
-                        clarificationMenu = { type: 'button', body: { text: `Para "${originalText}", ¿a cuál de estos te refieres?` }, action: { buttons: validProducts.map(p => ({ type: 'reply', reply: { id: p.sku, title: p.shortName } })) } };
-                    } else if (validProducts.length > 3) {
-                        clarificationMenu = { type: 'list', body: { text: `Para "${originalText}", ¿a cuál de estos te refieres?` }, action: { button: 'Ver opciones', sections: [{ title: 'Elige una presentación', rows: validProducts.slice(0, 10).map(p => ({ id: p.sku, title: p.shortName, description: p.productName })) }] } };
-                    }
-                    data.originalTextForClarification = originalText;
-                    await sendWhatsAppMessage(from, '', 'interactive', clarificationMenu);
-                    await setUserState(from, 'AWAITING_CLARIFICATION', data);
-                } else if (candidateProducts.length === 1) {
-                    const product = candidateProducts[0];
-                    const text = originalText.toLowerCase();
-                    const quantityMatch = text.match(/(\d+)(?!ml)/);
-                    const quantity = quantityMatch ? parseInt(quantityMatch[0]) : null;
-                    let unit = null;
-                    if (product.availableUnits) {
-                        for (const u of product.availableUnits) {
-                            const unitRegex = new RegExp(`\\b${u.toLowerCase()}s?\\b`);
-                            if (text.match(unitRegex)) {
-                                unit = u;
-                                break;
-                            }
-                        }
-                    }
-                    if (quantity && unit) {
-                        const newOrderItem = { ...product, quantity, unit };
-                        if (!data.orderItems) data.orderItems = [];
-                        data.orderItems.push(newOrderItem);
-                        await showCartSummary(from, data);
-                    } else {
-                        data.pendingProduct = product;
-                        await sendWhatsAppMessage(from, `Encontré "${product.productName}". ¿Qué cantidad necesitas?`);
-                        await setUserState(from, 'AWAITING_QUANTITY', data);
-                    }
+                const items = await splitTextIntoItemsAI(originalText);
+                if (items && items.length > 0) {
+                    data.itemsQueue = items;
+                    data.initialItemCount = items.length;
+                    await processNextItemInQueue(from, data);
+                } else {
+                    await sendWhatsAppMessage(from, "No pude identificar productos en tu pedido. Por favor, intenta de nuevo.");
                 }
                 break;
             
@@ -255,10 +317,7 @@ app.post('/webhook', async (req, res) => {
                     if (product.availableUnits) {
                         for (const u of product.availableUnits) {
                             const unitRegex = new RegExp(`\\b${u.toLowerCase()}s?\\b`);
-                            if (text.match(unitRegex)) {
-                                unit = u;
-                                break;
-                            }
+                            if (text.match(unitRegex)) { unit = u; break; }
                         }
                     }
                     delete data.originalTextForClarification;
@@ -266,7 +325,7 @@ app.post('/webhook', async (req, res) => {
                         const newOrderItem = { ...product, quantity, unit };
                         if (!data.orderItems) data.orderItems = [];
                         data.orderItems.push(newOrderItem);
-                        await showCartSummary(from, data);
+                        await processNextItemInQueue(from, data);
                     } else {
                         data.pendingProduct = product;
                         await sendWhatsAppMessage(from, `Seleccionaste "${product.productName}". ¿Qué cantidad necesitas?`);
@@ -281,8 +340,7 @@ app.post('/webhook', async (req, res) => {
                 const quantityMatch = text.match(/(\d+)(?!ml)/);
                 const quantity = quantityMatch ? parseInt(quantityMatch[0]) : null;
                 if (!quantity) {
-                    botResponseLog = "Por favor, ingresa una cantidad numérica válida.";
-                    await sendWhatsAppMessage(from, botResponseLog);
+                    await sendWhatsAppMessage(from, "Por favor, ingresa una cantidad numérica válida.");
                     break;
                 }
                 let unit = null;
@@ -306,7 +364,7 @@ app.post('/webhook', async (req, res) => {
                     if (!data.orderItems) data.orderItems = [];
                     data.orderItems.push(newOrderItem);
                     delete data.pendingProduct;
-                    await showCartSummary(from, data);
+                    await processNextItemInQueue(from, data);
                 } else if (product.availableUnits && product.availableUnits.length > 1) {
                     data.pendingQuantity = quantity;
                     const unitMenu = { type: 'button', body: { text: `Entendido, ${quantity}. ¿En qué unidad?` }, action: { buttons: product.availableUnits.slice(0, 3).map(u => ({ type: 'reply', reply: { id: u.toLowerCase(), title: u } })) } };
@@ -318,7 +376,7 @@ app.post('/webhook', async (req, res) => {
                     if (!data.orderItems) data.orderItems = [];
                     data.orderItems.push(newOrderItem);
                     delete data.pendingProduct;
-                    await showCartSummary(from, data);
+                    await processNextItemInQueue(from, data);
                 }
                 break;
 
@@ -329,7 +387,7 @@ app.post('/webhook', async (req, res) => {
                 data.orderItems.push(newOrderItem);
                 delete data.pendingProduct;
                 delete data.pendingQuantity;
-                await showCartSummary(from, data);
+                await processNextItemInQueue(from, data);
                 break;
 
             case 'AWAITING_ORDER_ACTION':
@@ -338,26 +396,60 @@ app.post('/webhook', async (req, res) => {
                     await sendWhatsAppMessage(from, '', 'interactive', askMoreMenu);
                     await setUserState(from, 'AWAITING_ORDER_TEXT', data);
                 } else if (userMessage === 'finish_order_start') {
-                    const confirmMenu = {
-                        type: 'button',
-                        body: { text: '¿Estás seguro de que deseas finalizar tu pedido?' },
-                        action: {
-                            buttons: [
-                                { type: 'reply', reply: { id: 'finish_order_confirm_yes', title: '✅ Sí' } },
-                                { type: 'reply', reply: { id: 'finish_order_confirm_no', title: '❌ No' } }
-                            ]
-                        }
-                    };
+                    const confirmMenu = { type: 'button', body: { text: '¿Estás seguro de que deseas finalizar tu pedido?' }, action: { buttons: [ { type: 'reply', reply: { id: 'finish_order_confirm_yes', title: '✅ Sí' } }, { type: 'reply', reply: { id: 'finish_order_confirm_no', title: '❌ No' } } ] } };
                     await sendWhatsAppMessage(from, '', 'interactive', confirmMenu);
                     await setUserState(from, 'AWAITING_FINAL_CONFIRMATION', data);
+                } else if (userMessage === 'delete_item_start') {
+                    if (data.orderItems && data.orderItems.length > 0) {
+                        const deleteMenu = { type: 'list', header: { type: 'text', text: 'Eliminar Producto' }, body: { text: 'Por favor, selecciona el producto que deseas eliminar.' }, action: { button: 'Ver productos', sections: [{ title: 'Tu pedido actual', rows: data.orderItems.map((item, index) => ({ id: `delete_item_index_${index}`, title: item.shortName, description: `${item.quantity} ${item.unit}` })) }] } };
+                        await sendWhatsAppMessage(from, '', 'interactive', deleteMenu);
+                        await setUserState(from, 'AWAITING_DELETE_CHOICE', data);
+                    }
                 }
+                break;
+
+            case 'AWAITING_DELETE_CHOICE':
+                if (userMessage.startsWith('delete_item_index_')) {
+                    const indexToDelete = parseInt(userMessage.replace('delete_item_index_', ''));
+                    if (!isNaN(indexToDelete) && data.orderItems[indexToDelete]) {
+                        const removedItem = data.orderItems.splice(indexToDelete, 1);
+                        await sendWhatsAppMessage(from, `Se ha eliminado "${removedItem[0].productName}" de tu pedido.`);
+                    }
+                }
+                await showCartSummary(from, data);
                 break;
 
             case 'AWAITING_FINAL_CONFIRMATION':
                 if (userMessage === 'finish_order_confirm_yes') {
                     const orderNumber = `PEDIDO-${Date.now()}`;
                     botResponseLog = `¡Pedido confirmado! ✅\n\nTu número de orden es: *${orderNumber}*`;
-                    await db.collection('orders').add({ orderNumber, phoneNumber: from, status: 'CONFIRMED', orderDate: admin.firestore.FieldValue.serverTimestamp(), items: data.orderItems });
+
+                    const sapPayload = {
+                        header: {
+                            SalesOrderType: "OR",
+                            SalesOrganization: user.salesOrganization,
+                            DistributionChannel: user.distributionChannel,
+                            Division: user.division,
+                            SoldToParty: user.sapCustomerId,
+                        },
+                        items: data.orderItems.map(item => ({
+                            Material: item.sku,
+                            RequestedQuantity: item.quantity,
+                            RequestedQuantityUnit: item.sapUnitMapping ? (item.sapUnitMapping[item.unit.toLowerCase()] || 'EA') : 'EA',
+                            Plant: item.defaultPlant || '1710'
+                        }))
+                    };
+                    
+                    const orderData = {
+                        orderNumber: orderNumber,
+                        status: 'CONFIRMED',
+                        orderDate: admin.firestore.FieldValue.serverTimestamp(),
+                        items: data.orderItems,
+                        sapPayload: sapPayload
+                    };
+                    
+                    await db.collection('users').doc(from).collection('orders').doc(orderNumber).set(orderData);
+                    
                     await sendWhatsAppMessage(from, botResponseLog);
                     await setUserState(from, 'IDLE', {});
                 } else {
