@@ -131,10 +131,6 @@ async function splitTextIntoItemsAI(userText) {
       Corrige errores de tipeo obvios. No añadas palabras que no estén en el texto original, como cantidades ('un', 'una').
       Texto del Cliente: "${userText}"
       Responde únicamente con un array de strings en formato JSON. No incluyas nada más en tu respuesta.
-      Ejemplo:
-      Texto del Cliente: "quiero 20 cajas de pilsen 630ml y 10 paquetes de coca-cola, tambien una servesa cristall"
-      Tu Respuesta:
-      ["20 cajas de pilsen 630ml", "10 paquetes de coca-cola", "cerveza cristal"]
     `;
     try {
         const response = await axios.post('https://openrouter.ai/api/v1/chat/completions', {
@@ -226,13 +222,10 @@ async function showCartSummary(from, data, user) {
         summary = "Tu carrito está vacío.\n\n";
     }
     summary += "\n¿Qué deseas hacer?";
-
-    const buttons = [ { type: 'reply', reply: { id: 'add_more_products', title: '➕ Añadir más' } } ];
+    const buttons = [ { type: 'reply', reply: { id: 'add_more_products', title: '➕ Añadir más' } }, { type: 'reply', reply: { id: 'finish_order_start', title: '✅ Finalizar Pedido' } }];
     if (data.orderItems && data.orderItems.length > 0) {
-        buttons.push({ type: 'reply', reply: { id: 'delete_item_start', title: '🗑️ Eliminar producto' } });
+        buttons.splice(1, 0, { type: 'reply', reply: { id: 'delete_item_start', title: '🗑️ Eliminar producto' } });
     }
-    buttons.push({ type: 'reply', reply: { id: 'finish_order_start', title: '✅ Finalizar Pedido' } });
-    
     const cartMenu = { type: 'button', body: { text: summary }, action: { buttons } };
     await sendWhatsAppMessage(from, '', 'interactive', cartMenu);
     await setUserState(from, 'AWAITING_ORDER_ACTION', data);
@@ -275,7 +268,6 @@ app.post('/webhook', async (req, res) => {
       const currentUserState = await getUserState(from);
       let { status, data = {} } = currentUserState;
 
-      // Inicia una nueva sesión si no existe una
       if (!data.sessionId) {
           data.sessionId = Date.now().toString();
           await db.collection('users').doc(from).collection('sessions').doc(data.sessionId).set({
@@ -313,7 +305,8 @@ app.post('/webhook', async (req, res) => {
                     data.initialItemCount = items.length;
                     await processNextItemInQueue(from, data, user);
                 } else {
-                    await sendWhatsAppMessage(from, "No pude identificar productos en tu pedido. Por favor, intenta de nuevo.");
+                    botResponseLog = "No pude identificar productos en tu pedido. Por favor, intenta de nuevo.";
+                    await sendWhatsAppMessage(from, botResponseLog);
                 }
                 break;
             
@@ -339,7 +332,8 @@ app.post('/webhook', async (req, res) => {
                         await processNextItemInQueue(from, data, user);
                     } else {
                         data.pendingProduct = product;
-                        await sendWhatsAppMessage(from, `Seleccionaste "${product.productName}". ¿Qué cantidad necesitas?`);
+                        botResponseLog = `Seleccionaste "${product.productName}". ¿Qué cantidad necesitas?`;
+                        await sendWhatsAppMessage(from, botResponseLog);
                         await setUserState(from, 'AWAITING_QUANTITY', data);
                     }
                 }
@@ -351,7 +345,8 @@ app.post('/webhook', async (req, res) => {
                 const quantityMatch = text.match(/(\d+)(?!ml)/);
                 const quantity = quantityMatch ? parseInt(quantityMatch[0]) : null;
                 if (!quantity) {
-                    await sendWhatsAppMessage(from, "Por favor, ingresa una cantidad numérica válida.");
+                    botResponseLog = "Por favor, ingresa una cantidad numérica válida.";
+                    await sendWhatsAppMessage(from, botResponseLog);
                     break;
                 }
                 let unit = null;
@@ -434,7 +429,6 @@ app.post('/webhook', async (req, res) => {
                 if (userMessage === 'finish_order_confirm_yes') {
                     const orderNumber = `PEDIDO-${Date.now()}`;
                     botResponseLog = `¡Pedido confirmado! ✅\n\nTu número de orden es: *${orderNumber}*`;
-                    
                     const sapPayload = {
                         header: {
                             SalesOrderType: "OR", SalesOrganization: user.salesOrganization,
@@ -454,7 +448,6 @@ app.post('/webhook', async (req, res) => {
                     };
                     await db.collection('users').doc(from).collection('orders').doc(orderNumber).set(orderData);
                     await sendWhatsAppMessage(from, botResponseLog);
-                    
                     const sessionRef = db.collection('users').doc(from).collection('sessions').doc(data.sessionId);
                     await sessionRef.update({ 
                         endTime: admin.firestore.FieldValue.serverTimestamp(),
@@ -474,12 +467,11 @@ app.post('/webhook', async (req, res) => {
         }
       }
 
-      // Guardado de conversación en la nueva estructura de sesiones
       if (data.sessionId && botResponseLog) {
           const sessionRef = db.collection('users').doc(from).collection('sessions').doc(data.sessionId);
           const turnData = {
               userMessage: originalText,
-              botResponse: botResponseLog || 'Resumen de carrito/menú enviado.',
+              botResponse: botResponseLog,
               status: status,
               timestamp: new Date()
           };
