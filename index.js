@@ -475,23 +475,24 @@ app.post('/webhook', async (req, res) => {
       }
 
       // Guardado de conversación en la nueva estructura de sesiones
-      if (data.sessionId && botResponseLog) {
-          const sessionRef = db.collection('users').doc(from).collection('sessions').doc(data.sessionId);
-          const turnData = {
-              userMessage: originalText,
-              botResponse: botResponseLog || 'Resumen de carrito/menú enviado.',
-              status: status,
-              timestamp: new Date()
-          };
-          const sessionDoc = await sessionRef.get();
-          if(sessionDoc.exists){
-            await sessionRef.update({
-                turns: admin.firestore.FieldValue.arrayUnion(turnData),
-                lastUpdated: admin.firestore.FieldValue.serverTimestamp()
-            });
-          }
-          console.log(`💾 Conversación guardada en la sesión ${data.sessionId} del usuario.`);
-      }
+   if (data.sessionId) {
+    const sessionRef = db.collection('users').doc(from).collection('sessions').doc(data.sessionId);
+    const turnData = {
+        userMessage: originalText,
+        botResponse: botResponseLog || '[respuesta enviada sin texto directo]',
+        status: status,
+        timestamp: new Date()
+    };
+    const sessionDoc = await sessionRef.get();
+    if (sessionDoc.exists) {
+        await sessionRef.update({
+            turns: admin.firestore.FieldValue.arrayUnion(turnData),
+            lastUpdated: admin.firestore.FieldValue.serverTimestamp()
+        });
+    }
+    console.log(`💾 Conversación guardada en la sesión ${data.sessionId} del usuario.`);
+}
+
 
   } catch (error) {
       console.error('❌ ERROR en la lógica del bot:', error);
