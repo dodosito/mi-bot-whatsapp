@@ -155,11 +155,11 @@ async function splitTextIntoItemsAI(userText) {
     }
 }
 
-async function processNextItemInQueue(from, data) {
+async function processNextItemInQueue(from, data, user) {
     console.log(`[COLA]: ${data.itemsQueue ? data.itemsQueue.length : 0} ítems restantes.`);
     if (!data.itemsQueue || data.itemsQueue.length === 0) {
         console.log("✅ Cola de ítems vacía. Mostrando resumen final.");
-        await showCartSummary(from, data);
+        await showCartSummary(from, data, user);
         return;
     }
 
@@ -169,7 +169,7 @@ async function processNextItemInQueue(from, data) {
     const candidateProducts = await findProductsInCatalog(nextItemText);
     if (candidateProducts.length === 0) {
         await sendWhatsAppMessage(from, `No encontré productos para "${nextItemText}". Saltando al siguiente ítem.`);
-        await processNextItemInQueue(from, data);
+        await processNextItemInQueue(from, data, user);
     } else if (candidateProducts.length > 1) {
         if (data.initialItemCount > 0) {
             const initialMessage = `Identifiqué ${data.initialItemCount} productos. ¡Vamos a completarlos!`;
@@ -203,7 +203,7 @@ async function processNextItemInQueue(from, data) {
             const newOrderItem = { ...product, quantity, unit };
             if (!data.orderItems) data.orderItems = [];
             data.orderItems.push(newOrderItem);
-            await processNextItemInQueue(from, data);
+            await processNextItemInQueue(from, data, user);
         } else {
             data.pendingProduct = product;
             await sendWhatsAppMessage(from, `Encontré "${product.productName}". ¿Qué cantidad necesitas?`);
@@ -212,9 +212,9 @@ async function processNextItemInQueue(from, data) {
     }
 }
 
-async function showCartSummary(from, data) {
+async function showCartSummary(from, data, user) {
     if (data.itemsQueue && data.itemsQueue.length > 0) {
-        await processNextItemInQueue(from, data);
+        await processNextItemInQueue(from, data, user);
         return;
     }
     let summary = "*Este es tu pedido hasta ahora:*\n\n";
@@ -275,7 +275,21 @@ app.post('/webhook', async (req, res) => {
       const currentUserState = await getUserState(from);
       let { status, data = {} } = currentUserState;
 
+      // --- CAMBIO: Lógica de Sesiones para Conversaciones ---
+      if (!data.sessionId) {
+          data.sessionId = Date.now().toString();
+          // Creamos el documento de la sesión al inicio
+          await db.collection('users').doc(from).collection('sessions').doc(data.sessionId).set({
+              startTime: admin.firestore.FieldValue.serverTimestamp(),
+              turns: [],
+              finalStatus: 'active'
+          });
+      }
+
       if (userMessage.toLowerCase().trim() === 'resetear') {
+          await db.collection('users').doc(from).collection('sessions').doc(data.sessionId).update({
+              finalStatus: 'reset'
+          });
           await setUserState(from, 'IDLE', {});
           await sendWhatsAppMessage(from, 'Estado reseteado. ✅');
           botResponseLog = 'Estado reseteado.';
@@ -286,12 +300,12 @@ app.post('/webhook', async (req, res) => {
                 if (userMessage === 'start_order') {
                     botResponseLog = "Por favor, ingresa tu pedido. Puedes incluir varios productos.\n\n*(Por ej: 5 cajas de cerveza pilsen y 3 gaseosas)*";
                     await sendWhatsAppMessage(from, botResponseLog);
-                    await setUserState(from, 'AWAITING_ORDER_TEXT', { orderItems: [] });
+                    await setUserState(from, 'AWAITING_ORDER_TEXT', { orderItems: [], sessionId: data.sessionId });
                 } else {
                     const mainMenu = { type: "button", body: { text: `¡Hola! Soy tu asistente virtual.` }, action: { buttons: [{ type: "reply", reply: { id: "start_order", title: "🛒 Realizar Pedido" } }, { type: "reply", reply: { id: "contact_agent", title: "🗣️ Hablar con asesor" } }] } };
                     await sendWhatsAppMessage(from, '', 'interactive', mainMenu);
                     botResponseLog = "Menú principal enviado.";
-                    await setUserState(from, 'AWAITING_MAIN_MENU_CHOICE', {});
+                    await setUserState(from, 'AWAITING_MAIN_MENU_CHOICE', { sessionId: data.sessionId });
                 }
                 break;
 
@@ -300,7 +314,7 @@ app.post('/webhook', async (req, res) => {
                 if (items && items.length > 0) {
                     data.itemsQueue = items;
                     data.initialItemCount = items.length;
-                    await processNextItemInQueue(from, data);
+                    await processNextItemInQueue(from, data, user);
                 } else {
                     await sendWhatsAppMessage(from, "No pude identificar productos en tu pedido. Por favor, intenta de nuevo.");
                 }
@@ -325,7 +339,7 @@ app.post('/webhook', async (req, res) => {
                         const newOrderItem = { ...product, quantity, unit };
                         if (!data.orderItems) data.orderItems = [];
                         data.orderItems.push(newOrderItem);
-                        await processNextItemInQueue(from, data);
+                        await processNextItemInQueue(from, data, user);
                     } else {
                         data.pendingProduct = product;
                         await sendWhatsAppMessage(from, `Seleccionaste "${product.productName}". ¿Qué cantidad necesitas?`);
@@ -364,7 +378,7 @@ app.post('/webhook', async (req, res) => {
                     if (!data.orderItems) data.orderItems = [];
                     data.orderItems.push(newOrderItem);
                     delete data.pendingProduct;
-                    await processNextItemInQueue(from, data);
+                    await processNextItemInQueue(from, data, user);
                 } else if (product.availableUnits && product.availableUnits.length > 1) {
                     data.pendingQuantity = quantity;
                     const unitMenu = { type: 'button', body: { text: `Entendido, ${quantity}. ¿En qué unidad?` }, action: { buttons: product.availableUnits.slice(0, 3).map(u => ({ type: 'reply', reply: { id: u.toLowerCase(), title: u } })) } };
@@ -376,7 +390,7 @@ app.post('/webhook', async (req, res) => {
                     if (!data.orderItems) data.orderItems = [];
                     data.orderItems.push(newOrderItem);
                     delete data.pendingProduct;
-                    await processNextItemInQueue(from, data);
+                    await processNextItemInQueue(from, data, user);
                 }
                 break;
 
@@ -387,7 +401,7 @@ app.post('/webhook', async (req, res) => {
                 data.orderItems.push(newOrderItem);
                 delete data.pendingProduct;
                 delete data.pendingQuantity;
-                await processNextItemInQueue(from, data);
+                await processNextItemInQueue(from, data, user);
                 break;
 
             case 'AWAITING_ORDER_ACTION':
@@ -416,45 +430,48 @@ app.post('/webhook', async (req, res) => {
                         await sendWhatsAppMessage(from, `Se ha eliminado "${removedItem[0].productName}" de tu pedido.`);
                     }
                 }
-                await showCartSummary(from, data);
+                await showCartSummary(from, data, user);
                 break;
 
             case 'AWAITING_FINAL_CONFIRMATION':
                 if (userMessage === 'finish_order_confirm_yes') {
                     const orderNumber = `PEDIDO-${Date.now()}`;
                     botResponseLog = `¡Pedido confirmado! ✅\n\nTu número de orden es: *${orderNumber}*`;
-
+                    
                     const sapPayload = {
                         header: {
-                            SalesOrderType: "OR",
-                            SalesOrganization: user.salesOrganization,
-                            DistributionChannel: user.distributionChannel,
-                            Division: user.division,
+                            SalesOrderType: "OR", SalesOrganization: user.salesOrganization,
+                            DistributionChannel: user.distributionChannel, Division: user.division,
                             SoldToParty: user.sapCustomerId,
                         },
                         items: data.orderItems.map(item => ({
-                            Material: item.sku,
-                            RequestedQuantity: item.quantity,
+                            Material: item.sku, RequestedQuantity: item.quantity,
                             RequestedQuantityUnit: item.sapUnitMapping ? (item.sapUnitMapping[item.unit.toLowerCase()] || 'EA') : 'EA',
                             Plant: item.defaultPlant || '1710'
                         }))
                     };
-                    
                     const orderData = {
-                        orderNumber: orderNumber,
-                        status: 'CONFIRMED',
+                        orderNumber, status: 'CONFIRMED',
                         orderDate: admin.firestore.FieldValue.serverTimestamp(),
-                        items: data.orderItems,
-                        sapPayload: sapPayload
+                        items: data.orderItems, sapPayload
                     };
                     
+                    // --- CAMBIO: Guardado en sub-colección de usuario ---
                     await db.collection('users').doc(from).collection('orders').doc(orderNumber).set(orderData);
                     
                     await sendWhatsAppMessage(from, botResponseLog);
+                    
+                    // Finalizamos la sesión de conversación
+                    const sessionRef = db.collection('users').doc(from).collection('sessions').doc(data.sessionId);
+                    await sessionRef.update({ 
+                        endTime: admin.firestore.FieldValue.serverTimestamp(),
+                        finalStatus: 'Pedido finalizado' 
+                    });
+
                     await setUserState(from, 'IDLE', {});
                 } else {
                     await sendWhatsAppMessage(from, "Ok, volvemos a tu pedido.");
-                    await showCartSummary(from, data);
+                    await showCartSummary(from, data, user);
                 }
                 break;
 
@@ -465,14 +482,20 @@ app.post('/webhook', async (req, res) => {
         }
       }
 
-      await db.collection('conversations').add({
-          phoneNumber: from,
-          userMessage: originalText || userMessage,
-          botResponse: botResponseLog || 'Resumen de carrito/menú enviado.',
-          status: status,
-          timestamp: admin.firestore.FieldValue.serverTimestamp()
-      });
-      console.log("💾 Conversación guardada en Firestore.");
+      // --- CAMBIO: Guardado de conversación en la sub-colección SESSIONS ---
+      if (data.sessionId && botResponseLog) {
+        const sessionRef = db.collection('users').doc(from).collection('sessions').doc(data.sessionId);
+        await sessionRef.update({
+            turns: admin.firestore.FieldValue.arrayUnion({
+                userMessage: originalText,
+                botResponse: botResponseLog,
+                status: status,
+                timestamp: admin.firestore.FieldValue.serverTimestamp()
+            }),
+            lastUpdated: admin.firestore.FieldValue.serverTimestamp()
+        });
+        console.log(`💾 Conversación guardada en la sesión ${data.sessionId} del usuario.`);
+      }
 
   } catch (error) {
       console.error('❌ ERROR en la lógica del bot:', error);
