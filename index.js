@@ -4,7 +4,7 @@ const admin = require('firebase-admin');
 const app = express();
 app.use(express.json());
 
-// --- CONFIGURACIÓN DE FIREBASE/FIRESTORE ---
+// --- CONFIGURACIÓNn DE FIREBASE/FIRESTORE ---
 const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY);
 if (!admin.apps.length) {
   admin.initializeApp({
