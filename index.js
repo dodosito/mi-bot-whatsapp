@@ -4,7 +4,7 @@ const admin = require('firebase-admin');
 const app = express();
 app.use(express.json());
 
-// --- CONFIGURACIÓNn DE FIREBASE/FIRESTORE ---
+// --- CONFIGURACIÓN DE FIREBASE/FIRESTORE ---
 const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY);
 if (!admin.apps.length) {
   admin.initializeApp({
@@ -131,10 +131,6 @@ async function splitTextIntoItemsAI(userText) {
       Corrige errores de tipeo obvios. No añadas palabras que no estén en el texto original, como cantidades ('un', 'una').
       Texto del Cliente: "${userText}"
       Responde únicamente con un array de strings en formato JSON. No incluyas nada más en tu respuesta.
-      Ejemplo:
-      Texto del Cliente: "quiero 20 cajas de pilsen 630ml y 10 paquetes de coca-cola, tambien una servesa cristall"
-      Tu Respuesta:
-      ["20 cajas de pilsen 630ml", "10 paquetes de coca-cola", "cerveza cristal"]
     `;
     try {
         const response = await axios.post('https://openrouter.ai/api/v1/chat/completions', {
@@ -226,13 +222,10 @@ async function showCartSummary(from, data, user) {
         summary = "Tu carrito está vacío.\n\n";
     }
     summary += "\n¿Qué deseas hacer?";
-
-    const buttons = [ { type: 'reply', reply: { id: 'add_more_products', title: '➕ Añadir más' } } ];
+    const buttons = [ { type: 'reply', reply: { id: 'add_more_products', title: '➕ Añadir más' } }, { type: 'reply', reply: { id: 'finish_order_start', title: '✅ Finalizar Pedido' } }];
     if (data.orderItems && data.orderItems.length > 0) {
-        buttons.push({ type: 'reply', reply: { id: 'delete_item_start', title: '🗑️ Eliminar producto' } });
+        buttons.splice(1, 0, { type: 'reply', reply: { id: 'delete_item_start', title: '🗑️ Eliminar producto' } });
     }
-    buttons.push({ type: 'reply', reply: { id: 'finish_order_start', title: '✅ Finalizar Pedido' } });
-    
     const cartMenu = { type: 'button', body: { text: summary }, action: { buttons } };
     await sendWhatsAppMessage(from, '', 'interactive', cartMenu);
     await setUserState(from, 'AWAITING_ORDER_ACTION', data);
@@ -285,9 +278,7 @@ app.post('/webhook', async (req, res) => {
       }
 
       if (userMessage.toLowerCase().trim() === 'resetear') {
-          await db.collection('users').doc(from).collection('sessions').doc(data.sessionId).update({
-              finalStatus: 'reset'
-          });
+          await db.collection('users').doc(from).collection('sessions').doc(data.sessionId).update({ finalStatus: 'reset' });
           await setUserState(from, 'IDLE', {});
           await sendWhatsAppMessage(from, 'Estado reseteado. ✅');
           botResponseLog = 'Estado reseteado.';
@@ -308,13 +299,30 @@ app.post('/webhook', async (req, res) => {
                 break;
 
             case 'AWAITING_ORDER_TEXT':
-                const items = await splitTextIntoItemsAI(originalText);
-                if (items && items.length > 0) {
-                    data.itemsQueue = items;
-                    data.initialItemCount = items.length;
-                    await processNextItemInQueue(from, data, user);
+                if (userMessage === 'back_to_cart') {
+                    await showCartSummary(from, data, user);
+                    break;
+                }
+
+                // --- ¡NUEVA CAPA DE DECISIÓN! ---
+                const words = originalText.split(' ').length;
+                const containsConnectors = originalText.includes(',') || originalText.includes(' y ');
+                
+                // Si el texto es largo o tiene conectores, usamos la IA para dividir.
+                if (words > 4 || containsConnectors) {
+                    const items = await splitTextIntoItemsAI(originalText);
+                    if (items && items.length > 0) {
+                        data.itemsQueue = items;
+                        data.initialItemCount = items.length;
+                        await processNextItemInQueue(from, data, user);
+                    } else {
+                        await sendWhatsAppMessage(from, "No pude identificar productos en tu pedido. Por favor, intenta de nuevo.");
+                    }
                 } else {
-                    await sendWhatsAppMessage(from, "No pude identificar productos en tu pedido. Por favor, intenta de nuevo.");
+                    // Si el texto es corto, lo procesamos como un solo ítem directamente.
+                    console.log("[FLUJO]: Procesando texto como un solo ítem (sin IA splitter).");
+                    data.itemsQueue = [originalText];
+                    await processNextItemInQueue(from, data, user);
                 }
                 break;
             
@@ -435,7 +443,6 @@ app.post('/webhook', async (req, res) => {
                 if (userMessage === 'finish_order_confirm_yes') {
                     const orderNumber = `PEDIDO-${Date.now()}`;
                     botResponseLog = `¡Pedido confirmado! ✅\n\nTu número de orden es: *${orderNumber}*`;
-                    
                     const sapPayload = {
                         header: {
                             SalesOrderType: "OR", SalesOrganization: user.salesOrganization,
@@ -455,7 +462,6 @@ app.post('/webhook', async (req, res) => {
                     };
                     await db.collection('users').doc(from).collection('orders').doc(orderNumber).set(orderData);
                     await sendWhatsAppMessage(from, botResponseLog);
-                    
                     const sessionRef = db.collection('users').doc(from).collection('sessions').doc(data.sessionId);
                     await sessionRef.update({ 
                         endTime: admin.firestore.FieldValue.serverTimestamp(),
@@ -483,10 +489,13 @@ app.post('/webhook', async (req, res) => {
               status: status,
               timestamp: new Date()
           };
-          await sessionRef.update({
-              turns: admin.firestore.FieldValue.arrayUnion(turnData),
-              lastUpdated: admin.firestore.FieldValue.serverTimestamp()
-          });
+          const sessionDoc = await sessionRef.get();
+          if(sessionDoc.exists){
+            await sessionRef.update({
+                turns: admin.firestore.FieldValue.arrayUnion(turnData),
+                lastUpdated: admin.firestore.FieldValue.serverTimestamp()
+            });
+          }
           console.log(`💾 Conversación guardada en la sesión ${data.sessionId} del usuario.`);
       }
 
