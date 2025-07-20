@@ -282,47 +282,47 @@ app.post('/webhook', async (req, res) => {
   const from = message.from;
   let userMessage, originalText = '', botResponseLog = '';
 
- // 🛒 Si viene como selección desde catálogo (WhatsApp API)
-if (message.type === 'order' && message.order?.product_items) {
-  // 1. Obtener el estado actual del usuario
-  const userState = await getUserState(from);
-  const data = userState?.data || {};
-  if (!data.orderItems) data.orderItems = [];
+ if (message.type === 'order' && message.order?.product_items) {
+  const sessionInfo = await getLatestSession(from);
+  if (!sessionInfo) {
+    console.log(`Sesión no encontrada para ${from}`);
+    await sendWhatsAppMessage(from, '⚠️ No se encontró una sesión activa.');
+    return res.sendStatus(200);
+  }
 
-  // 2. Procesar los productos seleccionados
+  const sessionId = sessionInfo.id;
+  const sessionData = sessionInfo.data;
+  const currentData = sessionData.data || {};
+
+  if (!currentData.orderItems) currentData.orderItems = [];
+
   for (const item of message.order.product_items) {
     const productId = item.product_retailer_id;
     const quantity = item.quantity || 1;
 
     const snapshot = await db.collection('products')
       .where('sku', '==', productId)
-      .limit(1)
-      .get();
+      .limit(1).get();
 
     if (!snapshot.empty) {
       const pd = snapshot.docs[0].data();
       const unit = pd.defaultUnit || 'unidad';
       const description = pd.productName || pd.name;
 
-      const orderItem = {
-        sku: productId,
-        productName: description,
-        quantity,
-        unit
-      };
+      const orderItem = { sku: productId, productName: description, quantity, unit };
 
-      data.orderItems.push(orderItem);
+      currentData.orderItems.push(orderItem);
       await sendWhatsAppMessage(from, `✅ Agregado al carrito: ${quantity} ${unit} de ${description}`);
     } else {
-      await sendWhatsAppMessage(from, `⚠️ Producto no encontrado para SKU: ${productId}`);
+      await sendWhatsAppMessage(from, `⚠️ SKU no encontrado: ${productId}`);
     }
   }
 
-  // 3. Actualizar el estado en memoria (NO en Firestore)
-  await setUserState(from, 'AWAITING_ORDER_ACTION', data);
+  // 🔁 No guardar aún en Firestore, solo actualizar el estado en memoria
+  await setUserState(from, 'AWAITING_ORDER_ACTION', currentData);
 
-  // 4. Mostrar resumen actualizado
-  await showCartSummary(from, data, user);
+  // 🔁 Mostrar resumen desde currentData
+  await showCartSummary(from, currentData);
 
   return res.sendStatus(200);
 }
