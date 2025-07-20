@@ -285,7 +285,14 @@ app.post('/webhook', async (req, res) => {
  // 🛒 Si viene como selección desde catálogo (WhatsApp API)
 if (message.type === 'order' && message.order?.product_items) {
   // ⬇️ Aquí recuperamos la sesión desde Firestore
-  const sessionDoc = await db.collection('sessions').doc(from).get();
+  const sessionInfo = await getLatestSession(from);
+if (!sessionInfo) {
+  console.log(`Sesión no encontrada para ${from}`);
+  return;
+}
+const sessionId = sessionInfo.id;
+const sessionData = sessionInfo.data;
+
   if (!sessionDoc.exists) {
     console.log('Sesión no encontrada para', from);
     return res.sendStatus(200);
