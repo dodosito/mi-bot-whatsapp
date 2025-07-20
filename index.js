@@ -11,6 +11,24 @@ if (!admin.apps.length) {
     credential: admin.credential.cert(serviceAccount)
   });
 }
+// ✅ Obtener la última sesión del usuario desde su subcolección sessions
+async function getLatestSession(phoneNumber) {
+  const sessionsRef = db.collection('users').doc(phoneNumber).collection('sessions');
+  const snapshot = await sessionsRef.orderBy('startTime', 'desc').limit(1).get();
+
+  if (snapshot.empty) {
+    console.log(`Sesión no encontrada para ${phoneNumber}`);
+    return null;
+  }
+
+  const sessionDoc = snapshot.docs[0];
+  return {
+    id: sessionDoc.id,
+    data: sessionDoc.data(),
+  };
+}
+
+
 const db = admin.firestore();
 
 // --- FUNCIONES DE UTILIDAD ---
