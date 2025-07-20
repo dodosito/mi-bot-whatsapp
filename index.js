@@ -264,8 +264,16 @@ app.post('/webhook', async (req, res) => {
   const from = message.from;
   let userMessage, originalText = '', botResponseLog = '';
 
-  // 🛒 Si viene como selección desde catálogo (WhatsApp API)
+ // 🛒 Si viene como selección desde catálogo (WhatsApp API)
 if (message.type === 'order' && message.order?.product_items) {
+  // ⬇️ Aquí recuperamos la sesión desde Firestore
+  const sessionDoc = await db.collection('sessions').doc(from).get();
+  if (!sessionDoc.exists) {
+    console.log('Sesión no encontrada para', from);
+    return res.sendStatus(200);
+  }
+  const data = sessionDoc.data();
+
   for (const item of message.order.product_items) {
     const productId = item.product_retailer_id;
     const quantity = item.quantity || 1;
@@ -294,6 +302,7 @@ if (message.type === 'order' && message.order?.product_items) {
   await setUserState(from, 'AWAITING_ORDER_ACTION', data);
   return res.sendStatus(200);
 }
+
 
 
   
