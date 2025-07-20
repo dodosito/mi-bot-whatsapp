@@ -285,32 +285,16 @@ app.post('/webhook', async (req, res) => {
  // 🛒 Si viene como selección desde catálogo (WhatsApp API)
 if (message.type === 'order' && message.order?.product_items) {
   // 🔁 Obtener la última sesión activa del usuario
-const sessionInfo = await getLatestSession(from);
-if (!sessionInfo) {
-  console.log(`Sesión no encontrada para ${from}`);
-  await sendWhatsAppMessage(from, '⚠️ No se encontró una sesión activa.');
-  return;
-}
-
-const sessionId = sessionInfo.id;
-const sessionData = sessionInfo.data;
-const data = sessionData.data || {};
-
-  
-  // ⬇️ Aquí recuperamos la sesión desde Firestore
   const sessionInfo = await getLatestSession(from);
-if (!sessionInfo) {
-  console.log(`Sesión no encontrada para ${from}`);
-  return;
-}
-const sessionId = sessionInfo.id;
-const sessionData = sessionInfo.data;
-
-  if (!sessionDoc.exists) {
-    console.log('Sesión no encontrada para', from);
+  if (!sessionInfo) {
+    console.log(`Sesión no encontrada para ${from}`);
+    await sendWhatsAppMessage(from, '⚠️ No se encontró una sesión activa.');
     return res.sendStatus(200);
   }
-  const data = sessionDoc.data();
+
+  const sessionId = sessionInfo.id;
+  const sessionData = sessionInfo.data;
+  const data = sessionData.data || {};
 
   for (const item of message.order.product_items) {
     const productId = item.product_retailer_id;
@@ -333,6 +317,7 @@ const sessionData = sessionInfo.data;
     } else {
       botResponseLog = `⚠️ SKU no encontrado: ${productId}`;
     }
+
     await sendWhatsAppMessage(from, botResponseLog);
   }
 
@@ -340,8 +325,6 @@ const sessionData = sessionInfo.data;
   await setUserState(from, 'AWAITING_ORDER_ACTION', data);
   return res.sendStatus(200);
 }
-
-
 
   
   if (message.type === 'text') {
