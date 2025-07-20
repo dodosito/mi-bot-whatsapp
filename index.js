@@ -284,6 +284,19 @@ app.post('/webhook', async (req, res) => {
 
  // 🛒 Si viene como selección desde catálogo (WhatsApp API)
 if (message.type === 'order' && message.order?.product_items) {
+  // 🔁 Obtener la última sesión activa del usuario
+const sessionInfo = await getLatestSession(from);
+if (!sessionInfo) {
+  console.log(`Sesión no encontrada para ${from}`);
+  await sendWhatsAppMessage(from, '⚠️ No se encontró una sesión activa.');
+  return;
+}
+
+const sessionId = sessionInfo.id;
+const sessionData = sessionInfo.data;
+const data = sessionData.data || {};
+
+  
   // ⬇️ Aquí recuperamos la sesión desde Firestore
   const sessionInfo = await getLatestSession(from);
 if (!sessionInfo) {
