@@ -323,14 +323,8 @@ if (message.type === 'order' && message.order?.product_items) {
 
   await showCartSummary(from, data, user);
   // Guardar nuevamente la sesión en Firestore
-await db.collection('users')
-  .doc(from)
-  .collection('sessions')
-  .doc(sessionId)
-  .update({ data });  // esto actualiza el campo `data` con los ítems nuevos
-
-// Luego sí actualiza el estado del usuario
 await setUserState(from, 'AWAITING_ORDER_ACTION', data);
+
 
   return res.sendStatus(200);
 }
