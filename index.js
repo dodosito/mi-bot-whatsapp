@@ -284,7 +284,6 @@ app.post('/webhook', async (req, res) => {
 
  // 🛒 Si viene como selección desde catálogo (WhatsApp API)
 if (message.type === 'order' && message.order?.product_items) {
-  // 🔁 Obtener la última sesión activa del usuario
   const sessionInfo = await getLatestSession(from);
   if (!sessionInfo) {
     console.log(`Sesión no encontrada para ${from}`);
@@ -294,7 +293,10 @@ if (message.type === 'order' && message.order?.product_items) {
 
   const sessionId = sessionInfo.id;
   const sessionData = sessionInfo.data;
-  const data = sessionData.data || {};
+
+  // ✅ ENLACE DIRECTO AL OBJETO DATA REAL
+  sessionData.data = sessionData.data || {};
+  const data = sessionData.data;
 
   for (const item of message.order.product_items) {
     const productId = item.product_retailer_id;
@@ -322,12 +324,13 @@ if (message.type === 'order' && message.order?.product_items) {
   }
 
   await showCartSummary(from, data, user);
-  // Guardar nuevamente la sesión en Firestore
-await setUserState(from, 'AWAITING_ORDER_ACTION', data);
 
+  // ✅ GUARDAMOS EL OBJETO MUTADO
+  await setUserState(from, 'AWAITING_ORDER_ACTION', sessionData.data);
 
   return res.sendStatus(200);
 }
+
 
   
   if (message.type === 'text') {
