@@ -284,49 +284,45 @@ app.post('/webhook', async (req, res) => {
 
  // 🛒 Si viene como selección desde catálogo (WhatsApp API)
 if (message.type === 'order' && message.order?.product_items) {
-  const sessionInfo = await getLatestSession(from);
-  if (!sessionInfo) {
-    console.log(`Sesión no encontrada para ${from}`);
-    await sendWhatsAppMessage(from, '⚠️ No se encontró una sesión activa.');
-    return res.sendStatus(200);
-  }
+  // 1. Obtener el estado actual del usuario
+  const userState = await getUserState(from);
+  const data = userState?.data || {};
+  if (!data.orderItems) data.orderItems = [];
 
-  const sessionId = sessionInfo.id;
-  const sessionData = sessionInfo.data;
-
-  // ✅ ENLACE DIRECTO AL OBJETO DATA REAL
-  sessionData.data = sessionData.data || {};
-  const data = sessionData.data;
-
+  // 2. Procesar los productos seleccionados
   for (const item of message.order.product_items) {
     const productId = item.product_retailer_id;
     const quantity = item.quantity || 1;
 
     const snapshot = await db.collection('products')
       .where('sku', '==', productId)
-      .limit(1).get();
+      .limit(1)
+      .get();
 
     if (!snapshot.empty) {
       const pd = snapshot.docs[0].data();
       const unit = pd.defaultUnit || 'unidad';
       const description = pd.productName || pd.name;
 
-      const orderItem = { sku: productId, productName: description, quantity, unit };
+      const orderItem = {
+        sku: productId,
+        productName: description,
+        quantity,
+        unit
+      };
 
-      if (!data.orderItems) data.orderItems = [];
       data.orderItems.push(orderItem);
-      botResponseLog = `✅ Agregado al carrito: ${quantity} ${unit} de ${description}`;
+      await sendWhatsAppMessage(from, `✅ Agregado al carrito: ${quantity} ${unit} de ${description}`);
     } else {
-      botResponseLog = `⚠️ SKU no encontrado: ${productId}`;
+      await sendWhatsAppMessage(from, `⚠️ Producto no encontrado para SKU: ${productId}`);
     }
-
-    await sendWhatsAppMessage(from, botResponseLog);
   }
 
-  await showCartSummary(from, data, user);
+  // 3. Actualizar el estado en memoria (NO en Firestore)
+  await setUserState(from, 'AWAITING_ORDER_ACTION', data);
 
-  // ✅ GUARDAMOS EL OBJETO MUTADO
-  await setUserState(from, 'AWAITING_ORDER_ACTION', sessionData.data);
+  // 4. Mostrar resumen actualizado
+  await showCartSummary(from, data, user);
 
   return res.sendStatus(200);
 }
